@@ -93,7 +93,7 @@ Leave empty to use the ComfyUI output folder.
 target_format
 ```
 
-v1c supports only:
+v1d supports only:
 
 ```text
 OGN-ModelManager
@@ -129,13 +129,19 @@ After an `execute` run completes, `run_mode` is reset to `dry_run`.
 The node has one button. Its label changes depending on `operation` and `run_mode`.
 
 ```text
-install_missing + dry_run   -> Dry Run: Find Missing Thumbnails
-install_missing + execute   -> Install Missing Thumbnails
-uninstall_managed + dry_run -> Dry Run: Find Managed Thumbnails
-uninstall_managed + execute -> Uninstall Managed Thumbnails
+install_missing + dry_run   -> 🎨 [Dry Run] Find Missing Thumbnails
+install_missing + execute   -> 🎨 [Execute!] Install Missing Thumbnails
+uninstall_managed + dry_run -> ❌ [Dry Run] Find Managed Thumbnails
+uninstall_managed + execute -> ❌ [Execute!] Uninstall Managed Thumbnails
 ```
 
 A progress bar and report area are shown inside the node.
+
+Report first-line icons are intentionally stricter than button icons:
+
+- Dry run reports do not use operation icons because no files were changed.
+- Install execute reports start with `🎨 Install complete.` only when thumbnail files were actually written.
+- Uninstall execute reports start with `❌ Uninstall complete.` only when managed thumbnail files were actually removed.
 
 ## Safe uninstall
 
@@ -151,7 +157,7 @@ For safety, `uninstall_managed + execute` requires a fresh `uninstall_managed + 
 
 If all checkpoints already have thumbnails, `source_image_root` is not scanned.
 
-Existing thumbnails are not overwritten in v1c.
+Existing thumbnails are not overwritten in v1d.
 
 ## Source image matching
 
@@ -189,7 +195,13 @@ This node only places files where OGN-ModelManager already looks for them.
 
 If thumbnails do not appear immediately, reload OGN-ModelManager or restart ComfyUI.
 
-## v1c limitations
+## Troubleshooting
+
+If all checkpoints are reported as unmatched, first check `source_image_root`.
+
+When `source_image_root` is empty, the exporter uses the current ComfyUI output directory only. If GM Image Saver is configured with an explicit output folder, or if your ComfyUI `output` folder is expected to be a junction/symlink, verify that it still points to the folder that actually contains generated images.
+
+## v1d limitations
 
 - OGN-ModelManager only
 - `.jpg` output only
@@ -209,4 +221,4 @@ It does not call OGN-ModelManager thumbnail APIs and does not modify OGN-ModelMa
 
 ## Development note
 
-This project keeps implementation specs under `.spec/*.md`. The zip/build label (`TOOL_BUILD`, for example `v1c`) is intentionally not written to JPEG comments because build labels may change frequently during ChatGPT-assisted iterations. Generated JPEG comments use a stable `comment_schema=cte_comment_v1` marker instead.
+This project keeps implementation specs under `.spec/*.md`. The zip/build label (`TOOL_BUILD`, for example `v1d`) is intentionally not written to JPEG comments because build labels may change frequently during ChatGPT-assisted iterations. Generated JPEG comments use a stable `comment_schema=cte_comment_v1` marker instead.

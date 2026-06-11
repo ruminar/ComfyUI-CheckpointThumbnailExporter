@@ -25,7 +25,7 @@ from server import PromptServer
 
 TOOL_NAME = "Checkpoint Thumbnail Exporter"
 # TOOL_BUILD is only for reports / debugging. It is intentionally not written to JPEG comments.
-TOOL_BUILD = "v1c"
+TOOL_BUILD = "v1d"
 # Stable comment schema used for managed thumbnail ownership checks.
 COMMENT_SCHEMA = "cte_comment_v1"
 MANAGED_MARKER = "managed=true"
@@ -483,7 +483,7 @@ def _run_install_missing(
     if not missing:
         _send_progress(progress_cb, node_id, "done", len(records), len(records), "All checkpoints already have thumbnails. Source scan was not needed.", "")
         report = [
-            "Install missing thumbnails: complete." if run_mode == "execute" else "Dry run complete.",
+            "Install complete." if run_mode == "execute" else "Dry run complete.",
             "",
             f"Checkpoints: {stats.checkpoints}",
             f"Existing thumbnails: {stats.existing_thumbnails}",
@@ -535,7 +535,7 @@ def _run_install_missing(
         header = "Dry run complete."
         changed = "No files were changed."
     else:
-        header = "Install complete."
+        header = "🎨 Install complete." if stats.installed > 0 else "Install complete."
         changed = "Thumbnail JPEG files were written next to checkpoint files."
 
     report: List[str] = [
@@ -553,7 +553,15 @@ def _run_install_missing(
         "",
         changed,
     ]
-    report.extend(_format_examples("", []))
+    if stats.missing_thumbnails > 0 and stats.unmatched == stats.missing_thumbnails:
+        report.extend([
+            "",
+            "Hint:",
+            "All missing checkpoints were unmatched.",
+            "Please check whether source_image_root points to the folder that actually contains generated images.",
+            "If you rely on a junction/symlinked output folder, verify that it still exists.",
+        ])
+
     report.extend(_format_examples("Examples:", install_examples))
     report.extend(_format_examples("Unmatched checkpoints:", unmatched_examples))
     report.extend(_format_examples("Errors:", error_examples))
@@ -622,7 +630,7 @@ def _run_uninstall_managed(
         changed = "No files were removed."
         action_line = f"Would remove: {stats.would_remove}"
     else:
-        header = "Uninstall complete."
+        header = "❌ Uninstall complete." if stats.removed > 0 else "Uninstall complete."
         changed = "Managed thumbnails were removed."
         action_line = f"Removed: {stats.removed}"
 
@@ -714,8 +722,6 @@ class CheckpointThumbnailExporter:
                     },
                 ),
                 "target_format": ([TARGET_OGN], {"default": TARGET_OGN}),
-                "operation": (["install_missing", "uninstall_managed"], {"default": "install_missing"}),
-                "run_mode": (["dry_run", "execute"], {"default": "dry_run"}),
                 "max_size": (
                     "INT",
                     {"default": 512, "min": 64, "max": 4096, "step": 16, "tooltip": "Maximum thumbnail width/height. Shrink only."},
@@ -724,6 +730,8 @@ class CheckpointThumbnailExporter:
                     "INT",
                     {"default": 90, "min": 1, "max": 100, "step": 1, "tooltip": "JPEG quality for generated thumbnails."},
                 ),
+                "operation": (["install_missing", "uninstall_managed"], {"default": "install_missing"}),
+                "run_mode": (["dry_run", "execute"], {"default": "dry_run"}),
             }
         }
 

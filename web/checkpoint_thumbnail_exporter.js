@@ -2,7 +2,7 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 const NODE_NAME = "CheckpointThumbnailExporter";
-const MIN_WIDTH = 390;
+const MIN_WIDTH = 470;
 const REPORT_HEIGHT = 170;
 
 function getWidget(node, name) {
@@ -56,9 +56,13 @@ function buttonLabel(node) {
     const operation = getWidgetValue(node, "operation", "install_missing");
     const runMode = getWidgetValue(node, "run_mode", "dry_run");
     if (operation === "uninstall_managed") {
-        return runMode === "execute" ? "Uninstall Managed Thumbnails" : "Dry Run: Find Managed Thumbnails";
+        return runMode === "execute"
+            ? "❌ [Execute!] Uninstall Managed Thumbnails"
+            : "❌ [Dry Run] Find Managed Thumbnails";
     }
-    return runMode === "execute" ? "Install Missing Thumbnails" : "Dry Run: Find Missing Thumbnails";
+    return runMode === "execute"
+        ? "🎨 [Execute!] Install Missing Thumbnails"
+        : "🎨 [Dry Run] Find Missing Thumbnails";
 }
 
 function payloadKey(node) {
