@@ -1,0 +1,3 @@
+# Pillow is already included in most ComfyUI environments.
+# It is listed here only to make the dependency explicit.
+Pillow>=9.0.0
