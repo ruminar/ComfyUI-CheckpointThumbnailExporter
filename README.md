@@ -93,7 +93,7 @@ Leave empty to use the ComfyUI output folder.
 target_format
 ```
 
-v1b supports only:
+v1c supports only:
 
 ```text
 OGN-ModelManager
@@ -151,13 +151,15 @@ For safety, `uninstall_managed + execute` requires a fresh `uninstall_managed + 
 
 If all checkpoints already have thumbnails, `source_image_root` is not scanned.
 
-Existing thumbnails are not overwritten in v1b.
+Existing thumbnails are not overwritten in v1c.
 
-## Source folder matching
+## Source image matching
 
-For each checkpoint, the exporter looks for source images in folders named like the checkpoint's safe name.
+For each checkpoint, the exporter generates `ckpt_name_safe`-style candidate keys from
+the checkpoint relative path and basename. Source images are matched when that key appears
+in a parent folder, filename stem, or relative path.
 
-Typical layout:
+Typical layouts:
 
 ```text
 inventory/
@@ -168,7 +170,18 @@ inventory/
     image_0001.jpg
 ```
 
-Nested images are allowed. The latest image by modification time is selected.
+Also supported:
+
+```text
+output/prefix/date/waiNSFWIllustrious_v150/image_0001.jpg
+output/prefix_waiNSFWIllustrious_v150_20260611_0001.jpg
+output/prefix/date/prefix_waiNSFWIllustrious_v150_0001.jpg
+```
+
+Exact directory matches are preferred over substring matches. If one source image matches
+multiple checkpoints at the same best priority, it is skipped as ambiguous.
+
+The latest image by modification time is selected.
 
 ## OGN-ModelManager refresh
 
@@ -176,7 +189,7 @@ This node only places files where OGN-ModelManager already looks for them.
 
 If thumbnails do not appear immediately, reload OGN-ModelManager or restart ComfyUI.
 
-## v1b limitations
+## v1c limitations
 
 - OGN-ModelManager only
 - `.jpg` output only
@@ -196,4 +209,4 @@ It does not call OGN-ModelManager thumbnail APIs and does not modify OGN-ModelMa
 
 ## Development note
 
-This project keeps implementation specs under `.spec/*.md`. The zip/build label (`TOOL_BUILD`, for example `v1b`) is intentionally not written to JPEG comments because build labels may change frequently during ChatGPT-assisted iterations. Generated JPEG comments use a stable `comment_schema=cte_comment_v1` marker instead.
+This project keeps implementation specs under `.spec/*.md`. The zip/build label (`TOOL_BUILD`, for example `v1c`) is intentionally not written to JPEG comments because build labels may change frequently during ChatGPT-assisted iterations. Generated JPEG comments use a stable `comment_schema=cte_comment_v1` marker instead.

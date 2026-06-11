@@ -25,7 +25,7 @@ from server import PromptServer
 
 TOOL_NAME = "Checkpoint Thumbnail Exporter"
 # TOOL_BUILD is only for reports / debugging. It is intentionally not written to JPEG comments.
-TOOL_BUILD = "v1b"
+TOOL_BUILD = "v1c"
 # Stable comment schema used for managed thumbnail ownership checks.
 COMMENT_SCHEMA = "cte_comment_v1"
 MANAGED_MARKER = "managed=true"
@@ -227,76 +227,136 @@ def _is_source_image(path: Path) -> bool:
     return path.is_file() and path.suffix.lower() in SOURCE_IMAGE_EXTS
 
 
-def _build_source_index(source_root: Path, missing_records: Sequence[CheckpointRecord], progress_cb: Optional[ProgressCallback], node_id: object) -> None:
-    """Fill record.source_image with the latest source image found under matching source dirs.
+def _norm_for_match(value: str) -> str:
+    """Normalize path/name text for case-insensitive ckpt_name_safe matching."""
+    return _sanitize_name(value).casefold()
 
-    This scans source_root once. A source image belongs to a checkpoint if any parent
-    directory name under source_root matches the checkpoint's source key.
+
+def _iter_source_match_candidates(path: Path, source_root: Path) -> Tuple[str, List[str], str, str]:
+    """Return normalized matching surfaces for a source image.
+
+    We intentionally match by substring because HandpickerSuite / GM Image Saver output
+    layouts may be `prefix/date/label`, `prefix_label_date`, or filenames containing
+    the checkpoint safe name. Exact directory segment matches are still preferred.
     """
-    key_to_records: Dict[str, List[CheckpointRecord]] = {}
-    for rec in missing_records:
-        for key in rec.source_keys:
-            key_to_records.setdefault(key, []).append(rec)
+    try:
+        rel = path.resolve().relative_to(source_root.resolve())
+    except Exception:
+        rel = path
 
-    # Avoid unsafe ambiguous basename matches.
-    unique_key_to_record = {key: owners[0] for key, owners in key_to_records.items() if len(owners) == 1}
-    if not source_root.exists() or not source_root.is_dir() or not unique_key_to_record:
+    rel_posix = rel.as_posix()
+    norm_rel = _norm_for_match(rel_posix)
+    norm_parts = [_norm_for_match(part) for part in rel.parts]
+    norm_stem = _norm_for_match(path.stem)
+    norm_name = _norm_for_match(path.name)
+    return norm_rel, norm_parts, norm_stem, norm_name
+
+
+def _source_match_rank(rec: CheckpointRecord, path: Path, source_root: Path) -> Optional[int]:
+    """Return a match rank for path -> checkpoint, or None if it does not match.
+
+    Lower is better.
+
+    0: exact normalized parent directory segment match
+    1: normalized parent directory segment contains ckpt_name_safe
+    2: normalized filename stem contains ckpt_name_safe
+    3: normalized relative path contains ckpt_name_safe
+
+    The substring rules are needed for output layouts where the checkpoint safe name is
+    embedded in a directory or filename rather than being the whole directory name.
+    """
+    norm_rel, norm_parts, norm_stem, norm_name = _iter_source_match_candidates(path, source_root)
+    keys = [_norm_for_match(key) for key in rec.source_keys]
+    keys = _unique([key for key in keys if key])
+    if not keys:
+        return None
+
+    # Prefer parent directory segments over filename/path matches. The image filename
+    # itself is often generic (00001.jpg), while parent folders are more likely to be
+    # deliberate label folders.
+    parent_parts = norm_parts[:-1]
+    for key in keys:
+        if key in parent_parts:
+            return 0
+    for key in keys:
+        if any(key in part for part in parent_parts):
+            return 1
+    for key in keys:
+        if key in norm_stem or key in norm_name:
+            return 2
+    for key in keys:
+        if key in norm_rel:
+            return 3
+    return None
+
+
+def _build_source_index(source_root: Path, missing_records: Sequence[CheckpointRecord], progress_cb: Optional[ProgressCallback], node_id: object) -> None:
+    """Fill record.source_image with the latest source image matched by ckpt_name_safe.
+
+    Source layouts are intentionally flexible. For each image under source_root, we try
+    to match the checkpoint's ckpt_name_safe candidates against parent directory names,
+    filename stem, and full relative path. Exact directory matches win over substring
+    matches. If one image matches multiple checkpoints at the same best rank, the image
+    is skipped as ambiguous rather than risking a wrong thumbnail.
+    """
+    if not source_root.exists() or not source_root.is_dir() or not missing_records:
         return
 
-    best: Dict[str, Tuple[float, str, Path]] = {}
+    best: Dict[int, Tuple[float, str, Path]] = {}
     files_seen = 0
+    matched_files = 0
+    ambiguous_files = 0
     last_progress = 0.0
 
     for dirpath, dirnames, filenames in os.walk(source_root):
         # Do not follow symlinked directories by default. This avoids surprise loops.
         dirnames[:] = [d for d in dirnames if not Path(dirpath, d).is_symlink()]
 
-        try:
-            rel_parent = Path(dirpath).resolve().relative_to(source_root)
-            parent_parts = set(rel_parent.parts)
-        except Exception:
-            parent_parts = set(Path(dirpath).parts)
-
-        matched_keys = [key for key in parent_parts if key in unique_key_to_record]
-        if not matched_keys:
-            continue
-
         for filename in filenames:
             path = Path(dirpath, filename)
             if not _is_source_image(path):
                 continue
             files_seen += 1
-            mtime = _safe_stat_mtime(path)
-            tie = path.name
-            for key in matched_keys:
-                current = best.get(key)
-                if current is None or (mtime, tie) > (current[0], current[1]):
-                    best[key] = (mtime, tie, path)
 
-        now = time.time()
-        if now - last_progress > 0.25:
-            last_progress = now
-            _send_progress(
-                progress_cb,
-                node_id,
-                "scanning_source",
-                files_seen,
-                0,
-                f"Scanning source images... files checked: {files_seen}",
-                str(source_root),
-            )
+            ranked: List[Tuple[int, CheckpointRecord]] = []
+            for rec in missing_records:
+                rank = _source_match_rank(rec, path, source_root)
+                if rank is not None:
+                    ranked.append((rank, rec))
 
-    for key, (_, _, image_path) in best.items():
-        rec = unique_key_to_record[key]
-        current = rec.source_image
-        if current is None:
+            if ranked:
+                best_rank = min(rank for rank, _ in ranked)
+                best_records = [rec for rank, rec in ranked if rank == best_rank]
+                unique_records: Dict[int, CheckpointRecord] = {id(rec): rec for rec in best_records}
+                if len(unique_records) == 1:
+                    rec = next(iter(unique_records.values()))
+                    current = best.get(id(rec))
+                    mtime = _safe_stat_mtime(path)
+                    tie = path.as_posix()
+                    if current is None or (mtime, tie) > (current[0], current[1]):
+                        best[id(rec)] = (mtime, tie, path)
+                    matched_files += 1
+                else:
+                    ambiguous_files += 1
+
+            now = time.time()
+            if now - last_progress > 0.25:
+                last_progress = now
+                _send_progress(
+                    progress_cb,
+                    node_id,
+                    "scanning_source",
+                    files_seen,
+                    0,
+                    f"Scanning source images... files checked: {files_seen}, matched: {matched_files}, ambiguous: {ambiguous_files}",
+                    str(source_root),
+                )
+
+    id_to_record = {id(rec): rec for rec in missing_records}
+    for rec_id, (_, _, image_path) in best.items():
+        rec = id_to_record.get(rec_id)
+        if rec is not None:
             rec.source_image = image_path
-        else:
-            # If several candidate keys point to the same checkpoint, keep the latest image.
-            cur_mtime = _safe_stat_mtime(current)
-            new_mtime = _safe_stat_mtime(image_path)
-            if (new_mtime, image_path.name) > (cur_mtime, current.name):
-                rec.source_image = image_path
 
 
 def _comment_text(
