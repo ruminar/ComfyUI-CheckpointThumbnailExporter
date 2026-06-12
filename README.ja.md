@@ -146,3 +146,11 @@ target=OGN-ModelManager
 - 既存サムネイルは上書きしない
 
 外部サービスからのサムネイル取得や、OGN-ModelManager内部状態の変更は行いません。
+
+## 📣 宣伝画像
+
+<img width="1055" height="1491" alt="CheckpointThumbnailExporter宣伝画像JA" src="https://github.com/user-attachments/assets/23200098-79a5-4d63-a3ee-e2d66c63c4f4" />
+※ ボタンは４つではなくて、１つのボタンをモードによって切り替える仕様になりました<br/><br/>
+
+<img width="1672" height="941" alt="CheckpointThumbnailExporter宣伝画像" src="https://github.com/user-attachments/assets/59dbed90-7042-485d-bc80-70cc2b098624" />
+※ しつこいようですが、ボタンは４つではなくて、１つのボタンをモードによって切り替える仕様になりました  
