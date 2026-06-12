@@ -167,7 +167,7 @@ class ExportStats:
 
 ProgressCallback = Callable[[Dict[str, object]], None]
 
-SCAN_PROGRESS_DOT_EVERY_FILES = 50
+SCAN_PROGRESS_DOT_EVERY_FILES = 100
 SCAN_PROGRESS_MAX_DOTS = 120
 MAX_SCAN_SOURCE_IMAGES = 5000
 
