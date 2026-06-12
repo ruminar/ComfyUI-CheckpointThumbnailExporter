@@ -99,6 +99,8 @@ run_mode
 > * `execute`（本番実行）が1回完了すると、`run_mode` は自動的に `dry_run` へ即座に引き戻される。50mロール紙を連続で誤爆印刷させないための、冷徹なセーフティじゃ！
 > * 進捗バーの下にあるReportエリアのアイコンはさらに厳格で、**実際にファイルが1枚以上書き込まれた／削除された本番実行時のみ** `🎨 Install complete.` / `❌ Uninstall complete.` のアイコンが点灯する仕様じゃ。
 
+<img width="616" height="595" alt="image" src="https://github.com/user-attachments/assets/492c84c7-b636-4378-b194-3dd7bb76af18" />
+
 ---
 
 ## 🔍 賢すぎるソース画像マッチングの仕様
