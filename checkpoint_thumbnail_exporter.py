@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import asyncio
 import secrets
 import traceback
 from dataclasses import dataclass, field
@@ -25,7 +26,7 @@ from server import PromptServer
 
 TOOL_NAME = "Checkpoint Thumbnail Exporter"
 # TOOL_BUILD is only for reports / debugging. It is intentionally not written to JPEG comments.
-TOOL_BUILD = "v1e"
+TOOL_BUILD = "v1f"
 # Stable comment schema used for managed thumbnail ownership checks.
 COMMENT_SCHEMA = "cte_comment_v1"
 MANAGED_MARKER = "managed=true"
@@ -166,8 +167,11 @@ class ExportStats:
 
 ProgressCallback = Callable[[Dict[str, object]], None]
 
+SCAN_PROGRESS_DOT_EVERY_FILES = 100
+SCAN_PROGRESS_MAX_DOTS = 120
 
-def _send_progress(progress_cb: Optional[ProgressCallback], node_id: object, phase: str, current: int, total: int, status: str = "", current_name: str = "") -> None:
+
+def _send_progress(progress_cb: Optional[ProgressCallback], node_id: object, phase: str, current: int, total: int, status: str = "", current_name: str = "", report: str = "") -> None:
     if progress_cb is None:
         return
     progress_cb({
@@ -177,6 +181,7 @@ def _send_progress(progress_cb: Optional[ProgressCallback], node_id: object, pha
         "total": int(total),
         "status": status,
         "current_name": current_name,
+        "report": report,
     })
 
 
@@ -306,7 +311,7 @@ def _build_source_index(source_root: Path, missing_records: Sequence[CheckpointR
     files_seen = 0
     matched_files = 0
     ambiguous_files = 0
-    last_progress = 0.0
+    dot_count = 0
 
     for dirpath, dirnames, filenames in os.walk(source_root):
         # Do not follow symlinked directories by default. This avoids surprise loops.
@@ -339,17 +344,31 @@ def _build_source_index(source_root: Path, missing_records: Sequence[CheckpointR
                 else:
                     ambiguous_files += 1
 
-            now = time.time()
-            if now - last_progress > 0.25:
-                last_progress = now
+            if files_seen % SCAN_PROGRESS_DOT_EVERY_FILES == 0:
+                dot_count += 1
+                visible_dots = min(dot_count, SCAN_PROGRESS_MAX_DOTS)
+                dots = "." * visible_dots
+                if dot_count > SCAN_PROGRESS_MAX_DOTS:
+                    dots = "..." + dots
+                status = f"Scanning source images... {files_seen} files"
+                report = "\n".join([
+                    "Scanning source images...",
+                    "",
+                    dots,
+                    f"Scanned: {files_seen} files",
+                    f"Matched candidates: {matched_files}",
+                    f"Ambiguous candidates: {ambiguous_files}",
+                    f"Source root: {source_root}",
+                ])
                 _send_progress(
                     progress_cb,
                     node_id,
                     "scanning_source",
                     files_seen,
                     0,
-                    f"Scanning source images... files checked: {files_seen}, matched: {matched_files}, ambiguous: {ambiguous_files}",
-                    str(source_root),
+                    status,
+                    f"matched={matched_files}, ambiguous={ambiguous_files}",
+                    report,
                 )
 
     id_to_record = {id(rec): rec for rec in missing_records}
@@ -494,7 +513,7 @@ def _run_install_missing(
         ]
         return {"ok": True, "stats": stats.__dict__, "report": "\n".join(report), "confirm_token": None}
 
-    _send_progress(progress_cb, node_id, "scanning_source", 0, len(missing), "Scanning source images for missing thumbnails...", str(source_root))
+    _send_progress(progress_cb, node_id, "scanning_source", 0, len(missing), "Scanning source images...", str(source_root), "Scanning source images...\n\nSource root: %s" % source_root)
     _build_source_index(source_root, missing, progress_cb, node_id)
 
     install_examples: List[str] = []
@@ -682,7 +701,7 @@ async def checkpoint_thumbnail_exporter_run(request):
             pass
 
     try:
-        result = _run_exporter(payload, progress_cb=progress_cb)
+        result = await asyncio.to_thread(_run_exporter, payload, progress_cb)
     except Exception:
         tb = traceback.format_exc()
         _send_progress(progress_cb, node_id, "done", 0, 0, "Error.", "")
