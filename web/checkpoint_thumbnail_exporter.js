@@ -193,7 +193,7 @@ app.registerExtension({
         nodeType.prototype.onNodeCreated = function () {
             const r = originalOnNodeCreated?.apply(this, arguments);
 
-            this.cte_report = "Ready.\n\nsource_image_root empty = ComfyUI output folder.\nDry run does not change files.";
+            this.cte_report = "Ready.\n\nButton behavior = operation + run_mode.\n\n🎨 install_missing\n  dry_run : find missing thumbnails\n  execute : install missing thumbnails\n\n❌ uninstall_managed\n  dry_run : find managed thumbnails\n  execute : uninstall managed thumbnails\n\ndry_run changes nothing.\nEmpty source_image_root uses ComfyUI output.";
             this.cte_progress = { phase: "idle", current: 0, total: 0, status: "Ready.", current_name: "" };
             this.cte_confirm_token = null;
             this.cte_confirm_key = null;

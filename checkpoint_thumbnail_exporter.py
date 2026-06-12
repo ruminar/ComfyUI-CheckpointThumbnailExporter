@@ -25,7 +25,7 @@ from server import PromptServer
 
 TOOL_NAME = "Checkpoint Thumbnail Exporter"
 # TOOL_BUILD is only for reports / debugging. It is intentionally not written to JPEG comments.
-TOOL_BUILD = "v1d"
+TOOL_BUILD = "v1e"
 # Stable comment schema used for managed thumbnail ownership checks.
 COMMENT_SCHEMA = "cte_comment_v1"
 MANAGED_MARKER = "managed=true"
@@ -647,12 +647,6 @@ def _run_uninstall_managed(
         "",
         changed,
     ]
-    if run_mode == "dry_run":
-        report.extend([
-            "",
-            "To remove these files, switch run_mode to execute and press the button.",
-            "The confirmation expires after 10 minutes.",
-        ])
     report.extend(_format_examples("Managed thumbnails:", managed_examples))
     report.extend(_format_examples("Skipped unmanaged/manual thumbnails:", skipped_examples))
     report.extend(_format_examples("Errors:", error_examples))
