@@ -89,6 +89,7 @@ function resetRunMode(node, reason) {
     node.cte_confirm_key = null;
     if (reason) {
         node.cte_report = reason;
+        node.cte_live_report = reason;
     }
     updateButton(node);
 }
@@ -132,6 +133,7 @@ async function runExporter(node) {
 
     node.cte_is_running = true;
     node.cte_report = `Running ${operation} / ${runMode}...`;
+    node.cte_live_report = node.cte_report;
     node.cte_progress = { phase: "running", current: 0, total: 0, status: "Starting...", current_name: "" };
     updateButton(node);
     app.graph.setDirtyCanvas(true, true);
@@ -144,6 +146,7 @@ async function runExporter(node) {
         });
         const result = await response.json();
         node.cte_report = result.report || "Done.";
+        node.cte_live_report = node.cte_report;
         node.cte_result = result;
 
         if (operation === "uninstall_managed" && runMode === "dry_run" && result.confirm_token) {
@@ -161,10 +164,12 @@ async function runExporter(node) {
         }
     } catch (error) {
         node.cte_report = `Request failed.\n\n${error}`;
+        node.cte_live_report = node.cte_report;
         node.cte_confirm_token = null;
         node.cte_confirm_key = null;
     } finally {
         node.cte_is_running = false;
+        node.cte_live_report = node.cte_report;
         updateButton(node);
         app.graph.setDirtyCanvas(true, true);
     }
@@ -179,6 +184,9 @@ api.addEventListener("checkpoint-thumbnail-exporter-progress", (event) => {
         if (node.type !== NODE_NAME) continue;
         if (String(node.id) !== String(data.node_id)) continue;
         node.cte_progress = data;
+        if (node.cte_is_running && data.report) {
+            node.cte_live_report = String(data.report);
+        }
         app.graph.setDirtyCanvas(true, true);
         break;
     }
@@ -198,6 +206,7 @@ app.registerExtension({
             this.cte_confirm_token = null;
             this.cte_confirm_key = null;
             this.cte_is_running = false;
+            this.cte_live_report = this.cte_report;
 
             const operationWidget = getWidget(this, "operation");
             const runModeWidget = getWidget(this, "run_mode");
@@ -287,7 +296,8 @@ app.registerExtension({
 
             ctx.fillStyle = "#E5E5E5";
             ctx.font = "11px monospace";
-            const lines = wrapText(ctx, this.cte_report || "", barW - 14);
+            const reportText = this.cte_is_running ? (this.cte_live_report || this.cte_report || "") : (this.cte_report || "");
+            const lines = wrapText(ctx, reportText, barW - 14);
             const lineHeight = 14;
             const maxLines = Math.floor((reportH - 12) / lineHeight);
             for (let i = 0; i < Math.min(lines.length, maxLines); i++) {
