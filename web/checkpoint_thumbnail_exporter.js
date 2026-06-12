@@ -281,7 +281,7 @@ app.registerExtension({
             const progressText = total > 0 ? `${current} / ${total}` : String(progress.status || "Ready.");
             ctx.fillText(progressText, margin, barY + 28);
 
-            if (progress.current_name) {
+            if (progress.current_name && progress.phase !== "scanning_source") {
                 const currentName = String(progress.current_name);
                 const displayName = currentName.length > 54 ? currentName.slice(0, 51) + "..." : currentName;
                 ctx.fillText(displayName, margin + 92, barY + 28);

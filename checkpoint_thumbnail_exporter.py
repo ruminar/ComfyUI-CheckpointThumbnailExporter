@@ -26,7 +26,7 @@ from server import PromptServer
 
 TOOL_NAME = "Checkpoint Thumbnail Exporter"
 # TOOL_BUILD is only for reports / debugging. It is intentionally not written to JPEG comments.
-TOOL_BUILD = "v1f"
+TOOL_BUILD = "v1g"
 # Stable comment schema used for managed thumbnail ownership checks.
 COMMENT_SCHEMA = "cte_comment_v1"
 MANAGED_MARKER = "managed=true"
@@ -167,8 +167,9 @@ class ExportStats:
 
 ProgressCallback = Callable[[Dict[str, object]], None]
 
-SCAN_PROGRESS_DOT_EVERY_FILES = 100
+SCAN_PROGRESS_DOT_EVERY_FILES = 50
 SCAN_PROGRESS_MAX_DOTS = 120
+MAX_SCAN_SOURCE_IMAGES = 5000
 
 
 def _send_progress(progress_cb: Optional[ProgressCallback], node_id: object, phase: str, current: int, total: int, status: str = "", current_name: str = "", report: str = "") -> None:
@@ -295,7 +296,7 @@ def _source_match_rank(rec: CheckpointRecord, path: Path, source_root: Path) -> 
     return None
 
 
-def _build_source_index(source_root: Path, missing_records: Sequence[CheckpointRecord], progress_cb: Optional[ProgressCallback], node_id: object) -> None:
+def _build_source_index(source_root: Path, missing_records: Sequence[CheckpointRecord], progress_cb: Optional[ProgressCallback], node_id: object) -> Dict[str, object]:
     """Fill record.source_image with the latest source image matched by ckpt_name_safe.
 
     Source layouts are intentionally flexible. For each image under source_root, we try
@@ -305,13 +306,20 @@ def _build_source_index(source_root: Path, missing_records: Sequence[CheckpointR
     is skipped as ambiguous rather than risking a wrong thumbnail.
     """
     if not source_root.exists() or not source_root.is_dir() or not missing_records:
-        return
+        return {
+            "files_seen": 0,
+            "hit_images": 0,
+            "ambiguous_images": 0,
+            "matched_checkpoints": 0,
+            "scan_limit_reached": False,
+        }
 
     best: Dict[int, Tuple[float, str, Path]] = {}
     files_seen = 0
-    matched_files = 0
-    ambiguous_files = 0
+    hit_images = 0
+    ambiguous_images = 0
     dot_count = 0
+    scan_limit_reached = False
 
     for dirpath, dirnames, filenames in os.walk(source_root):
         # Do not follow symlinked directories by default. This avoids surprise loops.
@@ -322,6 +330,10 @@ def _build_source_index(source_root: Path, missing_records: Sequence[CheckpointR
             if not _is_source_image(path):
                 continue
             files_seen += 1
+            if files_seen > MAX_SCAN_SOURCE_IMAGES:
+                files_seen = MAX_SCAN_SOURCE_IMAGES
+                scan_limit_reached = True
+                break
 
             ranked: List[Tuple[int, CheckpointRecord]] = []
             for rec in missing_records:
@@ -340,9 +352,9 @@ def _build_source_index(source_root: Path, missing_records: Sequence[CheckpointR
                     tie = path.as_posix()
                     if current is None or (mtime, tie) > (current[0], current[1]):
                         best[id(rec)] = (mtime, tie, path)
-                    matched_files += 1
+                    hit_images += 1
                 else:
-                    ambiguous_files += 1
+                    ambiguous_images += 1
 
             if files_seen % SCAN_PROGRESS_DOT_EVERY_FILES == 0:
                 dot_count += 1
@@ -350,14 +362,15 @@ def _build_source_index(source_root: Path, missing_records: Sequence[CheckpointR
                 dots = "." * visible_dots
                 if dot_count > SCAN_PROGRESS_MAX_DOTS:
                     dots = "..." + dots
-                status = f"Scanning source images... {files_seen} files"
+                status = f"Scanning source images... {files_seen} images"
                 report = "\n".join([
                     "Scanning source images...",
                     "",
                     dots,
-                    f"Scanned: {files_seen} files",
-                    f"Matched candidates: {matched_files}",
-                    f"Ambiguous candidates: {ambiguous_files}",
+                    f"Scanned: {files_seen} images",
+                    f"Hit images: {hit_images}",
+                    f"Matched checkpoints: {len(best)} / {len(missing_records)}",
+                    f"Ambiguous images: {ambiguous_images}",
                     f"Source root: {source_root}",
                 ])
                 _send_progress(
@@ -367,15 +380,26 @@ def _build_source_index(source_root: Path, missing_records: Sequence[CheckpointR
                     files_seen,
                     0,
                     status,
-                    f"matched={matched_files}, ambiguous={ambiguous_files}",
+                    "",
                     report,
                 )
+
+        if scan_limit_reached:
+            break
 
     id_to_record = {id(rec): rec for rec in missing_records}
     for rec_id, (_, _, image_path) in best.items():
         rec = id_to_record.get(rec_id)
         if rec is not None:
             rec.source_image = image_path
+
+    return {
+        "files_seen": files_seen,
+        "hit_images": hit_images,
+        "ambiguous_images": ambiguous_images,
+        "matched_checkpoints": len(best),
+        "scan_limit_reached": scan_limit_reached,
+    }
 
 
 def _comment_text(
@@ -514,7 +538,7 @@ def _run_install_missing(
         return {"ok": True, "stats": stats.__dict__, "report": "\n".join(report), "confirm_token": None}
 
     _send_progress(progress_cb, node_id, "scanning_source", 0, len(missing), "Scanning source images...", str(source_root), "Scanning source images...\n\nSource root: %s" % source_root)
-    _build_source_index(source_root, missing, progress_cb, node_id)
+    scan_summary = _build_source_index(source_root, missing, progress_cb, node_id)
 
     install_examples: List[str] = []
     unmatched_examples: List[str] = []
@@ -572,6 +596,13 @@ def _run_install_missing(
         "",
         changed,
     ]
+    if scan_summary.get("scan_limit_reached"):
+        report.extend([
+            "",
+            f"Scan limit reached: {MAX_SCAN_SOURCE_IMAGES} images.",
+            "Some matching images may exist after the scan limit.",
+            "Try narrowing source_image_root.",
+        ])
     if stats.missing_thumbnails > 0 and stats.unmatched == stats.missing_thumbnails:
         report.extend([
             "",
