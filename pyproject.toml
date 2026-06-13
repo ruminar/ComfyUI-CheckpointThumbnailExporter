@@ -1,0 +1,19 @@
+[project]
+name = "ComfyUI-CheckpointThumbnailExporter"
+description = "Create missing OGN-ModelManager checkpoint thumbnails from checkpoint-associated generated image folders."
+version = "0.1.0"
+license = { file = "LICENSE" }
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "Pillow>=9.0.0"
+]
+
+[project.urls]
+Repository = "https://github.com/ruminar/ComfyUI-CheckpointThumbnailExporter"
+Issues = "https://github.com/ruminar/ComfyUI-CheckpointThumbnailExporter/issues"
+
+[tool.comfy]
+PublisherId = "ruminar"
+DisplayName = "Checkpoint Thumbnail Exporter"
+Icon = "https://raw.githubusercontent.com/ruminar/ComfyUI-CheckpointThumbnailExporter/main/icon.png"
