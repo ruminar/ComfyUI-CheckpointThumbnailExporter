@@ -1,5 +1,25 @@
 # Release Notes
 
+## Unreleased
+
+### Added
+
+- Added a disposable persistent source-image index under the ComfyUI user directory.
+- Added `YYYYMMDD` date buckets, first-level fallback buckets, and root-level source handling.
+- Added cold full scans and warm targeted scans with uncapped date-bucket traversal.
+- Added date-bucket negative caching and PushLocalList-style change recovery.
+- Added local index repair for removed representatives and removed date directories.
+- Added regression tests for index lifecycle, fallback pruning, dry-run warm-up, execute reuse, and uninstall confirmation safety.
+
+### Changed
+
+- `install_missing + dry_run` may update the internal source index while leaving thumbnail and source-image files unchanged.
+- Valid indexed representatives remain stable instead of requiring an exact global-newest image on every run.
+- Concurrent exporter operations now use a first-wins, non-blocking process lock.
+- Thumbnail publication now uses unique temporary files and never overwrites a sidecar created during scanning.
+- Managed-thumbnail detection now requires exact stable-schema marker lines.
+- Uninstall confirmation is bound to the exact managed files observed during dry run.
+
 ## 0.1.0
 
 Initial release of **ComfyUI-CheckpointThumbnailExporter**.

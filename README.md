@@ -9,7 +9,7 @@ Generate images associated with each checkpoint
 ↓
 Checkpoint-specific images accumulate
 ↓
-Checkpoint Thumbnail Exporter picks the latest image for each checkpoint
+Checkpoint Thumbnail Exporter picks a recent representative image for each checkpoint
 ↓
 Missing OGN-ModelManager thumbnails are installed automatically
 ```
@@ -21,7 +21,7 @@ It works especially well with HandpickerSuite / GM Image Saver workflows, but th
 - Gets the ComfyUI checkpoint list.
 - Checks whether each checkpoint already has an OGN-compatible sidecar thumbnail.
 - Scans source image folders only for checkpoints without thumbnails.
-- Uses the latest source image for each checkpoint.
+- Uses a recent source image for each checkpoint and keeps valid indexed representatives stable.
 - Writes a resized `.jpg` next to the checkpoint file.
 - Adds a JPEG comment so it can later uninstall only thumbnails created by this node.
 - Does not touch OGN-ModelManager internals, cache, or private APIs.
@@ -168,7 +168,8 @@ Button behavior = operation + run_mode.
   dry_run : find managed thumbnails
   execute : uninstall managed thumbnails
 
-dry_run changes nothing.
+dry_run does not modify thumbnails or source images.
+The internal source index may be updated.
 Empty source_image_root uses ComfyUI output.
 ```
 
@@ -180,11 +181,12 @@ Report first-line icons are intentionally stricter than button icons:
 
 ## Safe uninstall
 
-`uninstall_managed` removes only JPEG thumbnails that contain this node's management marker in the JPEG comment.
+`uninstall_managed` removes only JPEG thumbnails whose JPEG comment contains this node's exact tool, management, stable-schema, and target marker lines.
 
 Manual thumbnails, OGN-uploaded thumbnails, and unmanaged sidecar images are skipped.
 
 For safety, `uninstall_managed + execute` requires a fresh `uninstall_managed + dry_run` first. The confirmation expires after 10 minutes.
+The confirmation is bound to the managed thumbnail files seen by that dry run; newly created or changed files are skipped.
 
 ## Important behavior
 
@@ -221,7 +223,23 @@ output/prefix/date/prefix_waiNSFWIllustrious_v150_0001.jpg
 
 Exact directory matches are preferred over substring matches. If one source image matches multiple checkpoints at the same best priority, it is skipped as ambiguous.
 
-The latest image by modification time is selected.
+When no valid indexed representative exists, the latest matching image by modification time is preferred within each scanned bucket. A valid cached representative remains selected even when newer images appear.
+
+## Persistent source index
+
+Source lookup uses a disposable JSON index under the ComfyUI user directory. The filesystem remains the source of truth.
+
+- Valid calendar-date `YYYYMMDD` directories are indexed as date buckets.
+- Source images outside date directories use first-level fallback buckets.
+- A cold or new bucket scan indexes the current checkpoint catalog in one pass.
+- Existing buckets use targeted scans for unresolved checkpoints.
+- `install_missing + dry_run` may update the internal index, while thumbnail and source-image files remain unchanged.
+- `execute` reuses the index warmed by dry run.
+- Date-bucket scans have no image-count limit.
+- If PushLocalList adds an image for a previously unmatched checkpoint, the changed date-directory state invalidates that negative cache and the next lookup scans the affected date bucket again.
+- If `source_image_root` changes, the disposable index is rebuilt for the new root.
+
+Valid cached representatives are reused without requiring an exact global-newest image. If a cached representative is deleted, only that checkpoint entry is repaired. If a date directory is moved outside `source_image_root`, its date entry is removed lazily.
 
 ## OGN-ModelManager refresh
 
@@ -239,7 +257,7 @@ When `source_image_root` is empty, the exporter uses the current ComfyUI output 
 
 - OGN-ModelManager only
 - `.jpg` output only
-- representative rule fixed to `latest`
+- cold-scan candidate preference fixed to `latest`; valid cached representatives remain stable
 - no overwrite mode
 - no Civitai download
 - no tag/favorite overlay burn-in

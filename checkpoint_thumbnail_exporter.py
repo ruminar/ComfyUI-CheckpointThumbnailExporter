@@ -4,9 +4,14 @@ import os
 import re
 import time
 import asyncio
+import hashlib
+import json
 import secrets
+import shutil
+import threading
 import traceback
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -63,24 +68,42 @@ def _confirmation_key(payload: Dict[str, object]) -> Tuple[str, str]:
     return (str(payload.get("operation", "")), str(payload.get("target_format", "")))
 
 
-def _make_confirm_token(payload: Dict[str, object]) -> str:
+def _make_confirm_token(payload: Dict[str, object], managed_snapshot: Optional[Dict[str, Tuple[int, int, int, int]]] = None) -> str:
     _clean_old_tokens()
     token = secrets.token_urlsafe(18)
     _CONFIRM_TOKENS[token] = {
         "created_at": time.time(),
         "key": _confirmation_key(payload),
+        "managed_snapshot": managed_snapshot or {},
     }
     return token
 
 
-def _consume_confirm_token(token: str, payload: Dict[str, object]) -> bool:
+def _consume_confirm_token(token: str, payload: Dict[str, object]) -> Optional[Dict[str, object]]:
     _clean_old_tokens()
     if not token:
-        return False
+        return None
     data = _CONFIRM_TOKENS.pop(token, None)
     if not data:
-        return False
-    return tuple(data.get("key", ())) == _confirmation_key(payload)
+        return None
+    if tuple(data.get("key", ())) != _confirmation_key(payload):
+        return None
+    return data
+
+
+def _file_identity(path: Path) -> Optional[Tuple[int, int, int, int]]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (int(stat.st_dev), int(stat.st_ino), int(stat.st_size), int(stat.st_mtime_ns))
+
+
+def _confirmation_path(path: Path) -> str:
+    try:
+        return os.path.normcase(str(path.resolve()))
+    except OSError:
+        return os.path.normcase(str(path.absolute()))
 
 
 def _sanitize_name(value: str) -> str:
@@ -169,7 +192,19 @@ ProgressCallback = Callable[[Dict[str, object]], None]
 
 SCAN_PROGRESS_DOT_EVERY_FILES = 100
 SCAN_PROGRESS_MAX_DOTS = 120
-MAX_SCAN_SOURCE_IMAGES = 5000
+
+# Persistent source-image index. Bucket scans intentionally have no image-count
+# limit: a capped scan must never become a trustworthy negative cache.
+SOURCE_INDEX_SCHEMA_VERSION = 3
+SOURCE_INDEX_DIRECTORY = "CheckpointThumbnailExporter"
+SOURCE_INDEX_FILENAME = "source_index.json"
+DATE_DIRECTORY_RE = re.compile(r"^[0-9]{8}$")
+SOURCE_INDEX_SCAN_RETRIES = 3
+
+# The HTTP endpoint runs exporter work in worker threads. Only one exporter may
+# mutate thumbnails or the shared source index at a time. A process exit releases
+# this in-memory lock automatically; normal exceptions release it in finally.
+_EXPORTER_RUN_LOCK = threading.Lock()
 
 
 def _send_progress(progress_cb: Optional[ProgressCallback], node_id: object, phase: str, current: int, total: int, status: str = "", current_name: str = "", report: str = "") -> None:
@@ -246,8 +281,8 @@ def _iter_source_match_candidates(path: Path, source_root: Path) -> Tuple[str, L
     the checkpoint safe name. Exact directory segment matches are still preferred.
     """
     try:
-        rel = path.resolve().relative_to(source_root.resolve())
-    except Exception:
+        rel = path.relative_to(source_root)
+    except (TypeError, ValueError):
         rel = path
 
     rel_posix = rel.as_posix()
@@ -258,28 +293,15 @@ def _iter_source_match_candidates(path: Path, source_root: Path) -> Tuple[str, L
     return norm_rel, norm_parts, norm_stem, norm_name
 
 
-def _source_match_rank(rec: CheckpointRecord, path: Path, source_root: Path) -> Optional[int]:
-    """Return a match rank for path -> checkpoint, or None if it does not match.
+def _normalized_record_keys(rec: CheckpointRecord) -> List[str]:
+    return _unique([key for key in (_norm_for_match(value) for value in rec.source_keys) if key])
 
-    Lower is better.
 
-    0: exact normalized parent directory segment match
-    1: normalized parent directory segment contains ckpt_name_safe
-    2: normalized filename stem contains ckpt_name_safe
-    3: normalized relative path contains ckpt_name_safe
-
-    The substring rules are needed for output layouts where the checkpoint safe name is
-    embedded in a directory or filename rather than being the whole directory name.
-    """
-    norm_rel, norm_parts, norm_stem, norm_name = _iter_source_match_candidates(path, source_root)
-    keys = [_norm_for_match(key) for key in rec.source_keys]
-    keys = _unique([key for key in keys if key])
+def _source_match_rank_for_keys(keys: Sequence[str], surfaces: Tuple[str, List[str], str, str]) -> Optional[int]:
+    norm_rel, norm_parts, norm_stem, norm_name = surfaces
     if not keys:
         return None
 
-    # Prefer parent directory segments over filename/path matches. The image filename
-    # itself is often generic (00001.jpg), while parent folders are more likely to be
-    # deliberate label folders.
     parent_parts = norm_parts[:-1]
     for key in keys:
         if key in parent_parts:
@@ -296,110 +318,536 @@ def _source_match_rank(rec: CheckpointRecord, path: Path, source_root: Path) -> 
     return None
 
 
-def _build_source_index(source_root: Path, missing_records: Sequence[CheckpointRecord], progress_cb: Optional[ProgressCallback], node_id: object) -> Dict[str, object]:
-    """Fill record.source_image with the latest source image matched by ckpt_name_safe.
+def _source_match_rank(rec: CheckpointRecord, path: Path, source_root: Path) -> Optional[int]:
+    """Return a match rank for path -> checkpoint, or None if it does not match.
 
-    Source layouts are intentionally flexible. For each image under source_root, we try
-    to match the checkpoint's ckpt_name_safe candidates against parent directory names,
-    filename stem, and full relative path. Exact directory matches win over substring
-    matches. If one image matches multiple checkpoints at the same best rank, the image
-    is skipped as ambiguous rather than risking a wrong thumbnail.
+    Lower is better.
+
+    0: exact normalized parent directory segment match
+    1: normalized parent directory segment contains ckpt_name_safe
+    2: normalized filename stem contains ckpt_name_safe
+    3: normalized relative path contains ckpt_name_safe
+
+    The substring rules are needed for output layouts where the checkpoint safe name is
+    embedded in a directory or filename rather than being the whole directory name.
     """
-    if not source_root.exists() or not source_root.is_dir() or not missing_records:
-        return {
-            "files_seen": 0,
-            "hit_images": 0,
-            "ambiguous_images": 0,
-            "matched_checkpoints": 0,
-            "scan_limit_reached": False,
-        }
+    return _source_match_rank_for_keys(
+        _normalized_record_keys(rec),
+        _iter_source_match_candidates(path, source_root),
+    )
 
+
+def _source_index_path() -> Path:
+    get_user_directory = getattr(folder_paths, "get_user_directory", None)
+    if callable(get_user_directory):
+        user_root = Path(get_user_directory())
+    else:
+        user_directory = getattr(folder_paths, "user_directory", None)
+        if user_directory:
+            user_root = Path(user_directory)
+        else:
+            user_root = Path(folder_paths.get_output_directory()).resolve().parent / "user"
+    return user_root / SOURCE_INDEX_DIRECTORY / SOURCE_INDEX_FILENAME
+
+
+def _source_root_identity(source_root: Path) -> str:
+    return os.path.normcase(str(source_root.resolve()))
+
+
+def _empty_source_index(source_root: Path) -> Dict[str, object]:
+    return {
+        "schema_version": SOURCE_INDEX_SCHEMA_VERSION,
+        "source_root": _source_root_identity(source_root),
+        "entries": [],
+    }
+
+
+def _load_source_index(source_root: Path) -> Tuple[Dict[str, object], bool]:
+    path = _source_index_path()
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return _empty_source_index(source_root), True
+
+    if not isinstance(data, dict):
+        return _empty_source_index(source_root), True
+    if data.get("schema_version") != SOURCE_INDEX_SCHEMA_VERSION:
+        return _empty_source_index(source_root), True
+    if os.path.normcase(str(data.get("source_root", ""))) != _source_root_identity(source_root):
+        return _empty_source_index(source_root), True
+    if not isinstance(data.get("entries"), list):
+        return _empty_source_index(source_root), True
+    return data, False
+
+
+def _save_source_index(data: Dict[str, object]) -> None:
+    path = _source_index_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        with tmp_path.open("x", encoding="utf-8", newline="\n") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _is_date_directory_name(name: str) -> bool:
+    if not DATE_DIRECTORY_RE.fullmatch(name):
+        return False
+    try:
+        datetime.strptime(name, "%Y%m%d")
+    except ValueError:
+        return False
+    return True
+
+
+def _path_mtime_ns(path: Path) -> int:
+    try:
+        return int(path.stat().st_mtime_ns)
+    except OSError:
+        return 0
+
+
+def _as_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _entry_key(entry: Dict[str, object]) -> Tuple[str, str]:
+    return (str(entry.get("bucket_type", "")), str(entry.get("path", "")))
+
+
+def _bucket_sort_key(entry: Dict[str, object], source_root: Path) -> Tuple[object, ...]:
+    bucket_type = str(entry.get("bucket_type", "fallback"))
+    rel_path = str(entry.get("path", ""))
+    if bucket_type == "date":
+        date_value = str(entry.get("date", "0"))
+        bucket_path = source_root if rel_path == "." else source_root / rel_path
+        parent_mtime = _path_mtime_ns(bucket_path.parent)
+        return (0, -_as_int(date_value), -parent_mtime, rel_path.casefold())
+    if bucket_type == "fallback":
+        bucket_path = source_root / rel_path
+        return (1, -_path_mtime_ns(bucket_path), rel_path.casefold())
+    return (2, 0, rel_path.casefold())
+
+
+def _new_bucket_entry(*, path: str, bucket_type: str, date: str = "") -> Dict[str, object]:
+    entry: Dict[str, object] = {
+        "path": path,
+        "bucket_type": bucket_type,
+        "checkpoints": {},
+        "negative_checks": {},
+        "initialized": False,
+    }
+    if date:
+        entry["date"] = date
+    return entry
+
+
+def _discover_source_buckets(source_root: Path, existing_entries: Sequence[object]) -> Tuple[List[Dict[str, object]], bool]:
+    """Discover date buckets plus first-level fallback buckets.
+
+    Date directories are terminal discovery boundaries. A fallback bucket scans its
+    first-level branch while pruning any date directory below it. Root-level images
+    use a small synthetic bucket with path '.'.
+    """
+    existing: Dict[Tuple[str, str], Dict[str, object]] = {}
+    for raw in existing_entries:
+        if isinstance(raw, dict):
+            existing[_entry_key(raw)] = raw
+
+    discovered: Dict[Tuple[str, str], Dict[str, object]] = {}
+    root_has_images = False
+    fallback_has_images: Dict[str, bool] = {}
+
+    if not source_root.exists() or not source_root.is_dir():
+        return [], bool(existing)
+
+    if _is_date_directory_name(source_root.name):
+        key = ("date", ".")
+        entry = existing.get(key) or _new_bucket_entry(path=".", bucket_type="date", date=source_root.name)
+        entry.update({"path": ".", "bucket_type": "date", "date": source_root.name})
+        discovered[key] = entry
+    else:
+        discovery_failed = False
+
+        def onerror(exc: OSError) -> None:
+            nonlocal discovery_failed
+            discovery_failed = True
+
+        for dirpath, dirnames, filenames in os.walk(source_root, topdown=True, onerror=onerror):
+            current = Path(dirpath)
+            dirnames[:] = [name for name in dirnames if not (current / name).is_symlink()]
+
+            date_names = [name for name in dirnames if _is_date_directory_name(name)]
+            for name in date_names:
+                bucket_path = current / name
+                rel = bucket_path.relative_to(source_root).as_posix()
+                key = ("date", rel)
+                entry = existing.get(key) or _new_bucket_entry(path=rel, bucket_type="date", date=name)
+                entry.update({"path": rel, "bucket_type": "date", "date": name})
+                discovered[key] = entry
+            dirnames[:] = [name for name in dirnames if name not in date_names]
+
+            rel_current = current.relative_to(source_root)
+            has_source_file = any(Path(name).suffix.lower() in SOURCE_IMAGE_EXTS for name in filenames)
+            if rel_current == Path("."):
+                root_has_images = root_has_images or has_source_file
+            elif rel_current.parts:
+                first = rel_current.parts[0]
+                fallback_has_images[first] = fallback_has_images.get(first, False) or has_source_file
+
+        for first, has_images in fallback_has_images.items():
+            if not has_images:
+                continue
+            key = ("fallback", first)
+            entry = existing.get(key) or _new_bucket_entry(path=first, bucket_type="fallback")
+            entry.update({"path": first, "bucket_type": "fallback"})
+            discovered[key] = entry
+        if root_has_images:
+            key = ("root", ".")
+            entry = existing.get(key) or _new_bucket_entry(path=".", bucket_type="root")
+            entry.update({"path": ".", "bucket_type": "root"})
+            discovered[key] = entry
+
+        # A transient permission/I/O error must not make valid cached buckets vanish.
+        if discovery_failed:
+            for key, entry in existing.items():
+                if key in discovered:
+                    continue
+                rel = str(entry.get("path", ""))
+                candidate = source_root if rel == "." else source_root / rel
+                if candidate.is_dir():
+                    discovered[key] = entry
+
+    old_order = [_entry_key(raw) for raw in existing_entries if isinstance(raw, dict)]
+    entries = [discovered[key] for key in old_order if key in discovered]
+    new_entries = [entry for key, entry in discovered.items() if key not in existing]
+    new_entries.sort(key=lambda entry: _bucket_sort_key(entry, source_root))
+    for new_entry in new_entries:
+        new_sort_key = _bucket_sort_key(new_entry, source_root)
+        insert_at = len(entries)
+        for index, existing_entry in enumerate(entries):
+            if new_sort_key < _bucket_sort_key(existing_entry, source_root):
+                insert_at = index
+                break
+        entries.insert(insert_at, new_entry)
+    old_keys = set(existing)
+    new_keys = set(discovered)
+    new_order = [_entry_key(entry) for entry in entries]
+    changed = old_keys != new_keys or old_order != new_order
+    return entries, changed
+
+
+def _catalog_signature(records: Sequence[CheckpointRecord]) -> str:
+    names = "\n".join(sorted((rec.relative_name for rec in records), key=str.casefold))
+    return hashlib.sha256(names.encode("utf-8")).hexdigest()
+
+
+def _resolve_cached_image(source_root: Path, entry: Dict[str, object], image_rel: object) -> Optional[Path]:
+    entry_rel = str(entry.get("path", ""))
+    bucket_dir = source_root if entry_rel == "." else source_root / entry_rel
+    try:
+        bucket_resolved = bucket_dir.resolve()
+        candidate = (bucket_resolved / str(image_rel)).resolve()
+        candidate.relative_to(bucket_resolved)
+        candidate.relative_to(source_root.resolve())
+    except (OSError, TypeError, ValueError):
+        return None
+    if not candidate.is_file() or candidate.suffix.lower() not in SOURCE_IMAGE_EXTS:
+        return None
+    if Image is not None:
+        try:
+            with Image.open(candidate) as image:
+                image.verify()
+        except Exception:
+            return None
+    return candidate
+
+
+def _scan_bucket_images(
+    *,
+    source_root: Path,
+    entry: Dict[str, object],
+    records: Sequence[CheckpointRecord],
+    progress_cb: Optional[ProgressCallback],
+    node_id: object,
+) -> Tuple[Dict[str, Path], Dict[str, object]]:
+    """Scan a whole bucket without an image-count limit."""
+    entry_rel = str(entry.get("path", ""))
+    bucket_type = str(entry.get("bucket_type", "fallback"))
+    bucket_dir = source_root if entry_rel == "." else source_root / entry_rel
+    record_keys = {id(rec): _normalized_record_keys(rec) for rec in records}
     best: Dict[int, Tuple[float, str, Path]] = {}
     files_seen = 0
     hit_images = 0
     ambiguous_images = 0
-    dot_count = 0
-    scan_limit_reached = False
+    complete = True
 
-    for dirpath, dirnames, filenames in os.walk(source_root):
-        # Do not follow symlinked directories by default. This avoids surprise loops.
-        dirnames[:] = [d for d in dirnames if not Path(dirpath, d).is_symlink()]
+    def process_path(path: Path) -> None:
+        nonlocal files_seen, hit_images, ambiguous_images
+        if not _is_source_image(path):
+            return
+        files_seen += 1
+        surfaces = _iter_source_match_candidates(path, source_root)
+        ranked: List[Tuple[int, CheckpointRecord]] = []
+        for rec in records:
+            rank = _source_match_rank_for_keys(record_keys[id(rec)], surfaces)
+            if rank is not None:
+                ranked.append((rank, rec))
+        if ranked:
+            best_rank = min(rank for rank, _ in ranked)
+            best_records = {id(rec): rec for rank, rec in ranked if rank == best_rank}
+            if len(best_records) == 1:
+                rec = next(iter(best_records.values()))
+                mtime = _safe_stat_mtime(path)
+                tie = path.as_posix()
+                current = best.get(id(rec))
+                if current is None or (mtime, tie) > (current[0], current[1]):
+                    best[id(rec)] = (mtime, tie, path)
+                hit_images += 1
+            else:
+                ambiguous_images += 1
 
-        for filename in filenames:
-            path = Path(dirpath, filename)
-            if not _is_source_image(path):
-                continue
-            files_seen += 1
-            if files_seen > MAX_SCAN_SOURCE_IMAGES:
-                files_seen = MAX_SCAN_SOURCE_IMAGES
-                scan_limit_reached = True
-                break
-
-            ranked: List[Tuple[int, CheckpointRecord]] = []
-            for rec in missing_records:
-                rank = _source_match_rank(rec, path, source_root)
-                if rank is not None:
-                    ranked.append((rank, rec))
-
-            if ranked:
-                best_rank = min(rank for rank, _ in ranked)
-                best_records = [rec for rank, rec in ranked if rank == best_rank]
-                unique_records: Dict[int, CheckpointRecord] = {id(rec): rec for rec in best_records}
-                if len(unique_records) == 1:
-                    rec = next(iter(unique_records.values()))
-                    current = best.get(id(rec))
-                    mtime = _safe_stat_mtime(path)
-                    tie = path.as_posix()
-                    if current is None or (mtime, tie) > (current[0], current[1]):
-                        best[id(rec)] = (mtime, tie, path)
-                    hit_images += 1
-                else:
-                    ambiguous_images += 1
-
-            if files_seen % SCAN_PROGRESS_DOT_EVERY_FILES == 0:
-                dot_count += 1
-                visible_dots = min(dot_count, SCAN_PROGRESS_MAX_DOTS)
-                dots = "." * visible_dots
-                if dot_count > SCAN_PROGRESS_MAX_DOTS:
-                    dots = "..." + dots
-                status = f"Scanning source images... {files_seen} images"
-                report = "\n".join([
-                    "Scanning source images...",
+        if files_seen % SCAN_PROGRESS_DOT_EVERY_FILES == 0:
+            _send_progress(
+                progress_cb,
+                node_id,
+                "scanning_source",
+                files_seen,
+                0,
+                f"Indexing source images... {files_seen} images",
+                entry_rel,
+                "\n".join([
+                    "Indexing source images...",
                     "",
-                    dots,
+                    "." * min(files_seen // SCAN_PROGRESS_DOT_EVERY_FILES, SCAN_PROGRESS_MAX_DOTS),
+                    f"Bucket: {entry_rel}",
                     f"Scanned: {files_seen} images",
                     f"Hit images: {hit_images}",
-                    f"Matched checkpoints: {len(best)} / {len(missing_records)}",
                     f"Ambiguous images: {ambiguous_images}",
-                    f"Source root: {source_root}",
-                ])
-                _send_progress(
-                    progress_cb,
-                    node_id,
-                    "scanning_source",
-                    files_seen,
-                    0,
-                    status,
-                    "",
-                    report,
-                )
+                ]),
+            )
 
-        if scan_limit_reached:
-            break
+    try:
+        if bucket_type == "root":
+            for child in bucket_dir.iterdir():
+                process_path(child)
+        else:
+            errors: List[OSError] = []
 
-    id_to_record = {id(rec): rec for rec in missing_records}
-    for rec_id, (_, _, image_path) in best.items():
-        rec = id_to_record.get(rec_id)
-        if rec is not None:
-            rec.source_image = image_path
+            def onerror(exc: OSError) -> None:
+                errors.append(exc)
 
-    return {
+            for dirpath, dirnames, filenames in os.walk(bucket_dir, topdown=True, onerror=onerror):
+                current = Path(dirpath)
+                dirnames[:] = [name for name in dirnames if not (current / name).is_symlink()]
+                if bucket_type == "fallback":
+                    dirnames[:] = [name for name in dirnames if not _is_date_directory_name(name)]
+                for filename in filenames:
+                    process_path(current / filename)
+            if errors:
+                complete = False
+    except OSError:
+        complete = False
+
+    id_to_record = {id(rec): rec for rec in records}
+    found = {
+        id_to_record[rec_id].relative_name: value[2]
+        for rec_id, value in best.items()
+        if rec_id in id_to_record
+    }
+    return found, {
         "files_seen": files_seen,
         "hit_images": hit_images,
         "ambiguous_images": ambiguous_images,
-        "matched_checkpoints": len(best),
-        "scan_limit_reached": scan_limit_reached,
+        "complete": complete,
     }
+
+
+def _find_sources_with_persistent_index(
+    *,
+    source_root: Path,
+    all_records: Sequence[CheckpointRecord],
+    missing_records: Sequence[CheckpointRecord],
+    progress_cb: Optional[ProgressCallback],
+    node_id: object,
+) -> Dict[str, object]:
+    """Resolve missing checkpoint sources through date/fallback bucket caches."""
+    data, dirty = _load_source_index(source_root)
+    entries, discovered_changed = _discover_source_buckets(source_root, data.get("entries", []))
+    dirty = dirty or discovered_changed
+    data["entries"] = entries
+
+    unresolved: Dict[str, CheckpointRecord] = {rec.relative_name: rec for rec in missing_records}
+    catalog_signature = _catalog_signature(all_records)
+    summary: Dict[str, object] = {
+        "buckets": len(entries),
+        "buckets_scanned": 0,
+        "full_scans": 0,
+        "targeted_scans": 0,
+        "files_seen": 0,
+        "cache_hits": 0,
+        "negative_hits": 0,
+        "unstable_scans": 0,
+        "save_error": "",
+    }
+
+    for entry in entries:
+        if not unresolved:
+            break
+
+        entry_rel = str(entry.get("path", ""))
+        bucket_dir = source_root if entry_rel == "." else source_root / entry_rel
+        if not bucket_dir.is_dir():
+            dirty = True
+            continue
+
+        checkpoints = entry.get("checkpoints")
+        if not isinstance(checkpoints, dict):
+            checkpoints = {}
+            entry["checkpoints"] = checkpoints
+            dirty = True
+        negatives = entry.get("negative_checks")
+        if not isinstance(negatives, dict):
+            negatives = {}
+            entry["negative_checks"] = negatives
+            dirty = True
+
+        # Positive cache entries are trusted while the representative path remains
+        # a safe, supported regular image within the bucket.
+        force_scan: set[str] = set()
+        for relative_name in list(unresolved):
+            cached = checkpoints.get(relative_name)
+            if not isinstance(cached, dict):
+                if relative_name in checkpoints:
+                    checkpoints.pop(relative_name, None)
+                    negatives.pop(relative_name, None)
+                    force_scan.add(relative_name)
+                    dirty = True
+                continue
+            image_path = _resolve_cached_image(source_root, entry, cached.get("image"))
+            if image_path is None:
+                checkpoints.pop(relative_name, None)
+                negatives.pop(relative_name, None)
+                force_scan.add(relative_name)
+                dirty = True
+                continue
+            unresolved[relative_name].source_image = image_path
+            unresolved.pop(relative_name, None)
+            summary["cache_hits"] = int(summary["cache_hits"]) + 1
+
+        if not unresolved:
+            break
+
+        bucket_type = str(entry.get("bucket_type", "fallback"))
+        current_mtime_ns = _path_mtime_ns(bucket_dir)
+        full_scan = entry.get("full_scan")
+        full_scan_valid = (
+            bucket_type == "date"
+            and isinstance(full_scan, dict)
+            and bool(full_scan.get("complete"))
+            and _as_int(full_scan.get("dir_mtime_ns"), -1) == current_mtime_ns
+            and str(full_scan.get("catalog_signature", "")) == catalog_signature
+        )
+
+        records_to_scan: List[CheckpointRecord] = []
+        for relative_name, rec in unresolved.items():
+            if relative_name in force_scan:
+                records_to_scan.append(rec)
+                continue
+            if full_scan_valid:
+                summary["negative_hits"] = int(summary["negative_hits"]) + 1
+                continue
+            negative = negatives.get(relative_name)
+            if (
+                bucket_type == "date"
+                and isinstance(negative, dict)
+                and _as_int(negative.get("dir_mtime_ns"), -1) == current_mtime_ns
+            ):
+                summary["negative_hits"] = int(summary["negative_hits"]) + 1
+                continue
+            records_to_scan.append(rec)
+
+        if not records_to_scan:
+            continue
+
+        is_full_scan = not bool(entry.get("initialized"))
+        scan_records = list(all_records) if is_full_scan else records_to_scan
+        found: Dict[str, Path] = {}
+        scan_info: Dict[str, object] = {"complete": False, "files_seen": 0}
+        stable = bucket_type != "date"
+        final_mtime_ns = current_mtime_ns
+
+        for _attempt in range(SOURCE_INDEX_SCAN_RETRIES if bucket_type == "date" else 1):
+            start_mtime_ns = _path_mtime_ns(bucket_dir)
+            found, scan_info = _scan_bucket_images(
+                source_root=source_root,
+                entry=entry,
+                records=scan_records,
+                progress_cb=progress_cb,
+                node_id=node_id,
+            )
+            final_mtime_ns = _path_mtime_ns(bucket_dir)
+            stable = bucket_type != "date" or start_mtime_ns == final_mtime_ns
+            if stable:
+                break
+            summary["unstable_scans"] = int(summary["unstable_scans"]) + 1
+
+        summary["buckets_scanned"] = int(summary["buckets_scanned"]) + 1
+        summary["full_scans" if is_full_scan else "targeted_scans"] = int(
+            summary["full_scans" if is_full_scan else "targeted_scans"]
+        ) + 1
+        summary["files_seen"] = int(summary["files_seen"]) + int(scan_info.get("files_seen", 0))
+
+        for relative_name, image_path in found.items():
+            try:
+                image_rel = image_path.relative_to(bucket_dir).as_posix()
+            except ValueError:
+                continue
+            checkpoints[relative_name] = {"image": image_rel}
+            negatives.pop(relative_name, None)
+            dirty = True
+            rec = unresolved.get(relative_name)
+            if rec is not None:
+                rec.source_image = image_path
+                unresolved.pop(relative_name, None)
+
+        complete = bool(scan_info.get("complete"))
+        if bucket_type == "date" and complete and stable:
+            scanned_names = {rec.relative_name for rec in scan_records}
+            for relative_name in scanned_names - set(found):
+                negatives[relative_name] = {"dir_mtime_ns": final_mtime_ns}
+            if is_full_scan:
+                entry["full_scan"] = {
+                    "complete": True,
+                    "dir_mtime_ns": final_mtime_ns,
+                    "catalog_signature": catalog_signature,
+                }
+            dirty = True
+        if complete and stable:
+            entry["initialized"] = True
+            dirty = True
+
+    if dirty:
+        try:
+            _save_source_index(data)
+        except OSError as exc:
+            summary["save_error"] = str(exc)
+    summary["matched_checkpoints"] = sum(1 for rec in missing_records if rec.source_image is not None)
+    summary["unmatched_checkpoints"] = len(missing_records) - int(summary["matched_checkpoints"])
+    summary["index_path"] = str(_source_index_path())
+    return summary
 
 
 def _comment_text(
@@ -450,15 +898,44 @@ def _create_thumbnail(source_image: Path, target_path: Path, max_size: int, jpeg
 
         img.thumbnail((max_size, max_size), _image_resampling_lanczos())
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = target_path.with_name(target_path.name + ".tmp")
-        img.save(
-            tmp_path,
-            format="JPEG",
-            quality=jpeg_quality,
-            optimize=True,
-            comment=comment.encode("utf-8"),
-        )
-        os.replace(tmp_path, target_path)
+        tmp_path = target_path.with_name(f"{target_path.name}.{secrets.token_hex(8)}.tmp")
+        try:
+            img.save(
+                tmp_path,
+                format="JPEG",
+                quality=jpeg_quality,
+                optimize=True,
+                comment=comment.encode("utf-8"),
+            )
+            try:
+                # A same-directory hard link publishes the completed JPEG atomically
+                # and fails rather than overwriting a sidecar created during scanning.
+                os.link(tmp_path, target_path)
+            except FileExistsError:
+                raise
+            except OSError:
+                # Some network/removable filesystems do not support hard links. The
+                # exclusive destination open keeps the no-overwrite guarantee there.
+                created_target = False
+                try:
+                    target = target_path.open("xb")
+                    created_target = True
+                    with tmp_path.open("rb") as source, target:
+                        shutil.copyfileobj(source, target)
+                        target.flush()
+                        os.fsync(target.fileno())
+                except Exception:
+                    if created_target:
+                        try:
+                            target_path.unlink()
+                        except FileNotFoundError:
+                            pass
+                    raise
+        finally:
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _read_jpeg_comment(path: Path) -> str:
@@ -478,7 +955,14 @@ def _is_managed_thumbnail(path: Path) -> bool:
     if path.suffix.lower() not in {".jpg", ".jpeg"}:
         return False
     comment = _read_jpeg_comment(path)
-    return TOOL_NAME in comment and MANAGED_MARKER in comment and f"target={TARGET_OGN}" in comment
+    lines = {line.strip() for line in comment.splitlines()}
+    return {
+        TOOL_NAME,
+        MANAGED_MARKER,
+        f"tool={TOOL_NAME}",
+        f"comment_schema={COMMENT_SCHEMA}",
+        f"target={TARGET_OGN}",
+    }.issubset(lines)
 
 
 def _format_examples(title: str, items: Sequence[str], limit: int = 12) -> List[str]:
@@ -538,7 +1022,13 @@ def _run_install_missing(
         return {"ok": True, "stats": stats.__dict__, "report": "\n".join(report), "confirm_token": None}
 
     _send_progress(progress_cb, node_id, "scanning_source", 0, len(missing), "Scanning source images...", str(source_root), "Scanning source images...\n\nSource root: %s" % source_root)
-    scan_summary = _build_source_index(source_root, missing, progress_cb, node_id)
+    scan_summary = _find_sources_with_persistent_index(
+        source_root=source_root,
+        all_records=records,
+        missing_records=missing,
+        progress_cb=progress_cb,
+        node_id=node_id,
+    )
 
     install_examples: List[str] = []
     unmatched_examples: List[str] = []
@@ -568,6 +1058,12 @@ def _run_install_missing(
             _create_thumbnail(rec.source_image, target_path, max_size, jpeg_quality, comment)
             stats.installed += 1
             install_examples.append(f"{rec.relative_name} <- {rec.source_image.name}")
+        except FileExistsError:
+            # A sidecar appeared after the initial target scan. Preserve it and treat
+            # the checkpoint as an existing-thumbnail race rather than an error.
+            stats.existing_thumbnails += 1
+            if len(existing_examples) < 5:
+                existing_examples.append(f"{rec.relative_name} -> {target_path.name} (created during scan)")
         except Exception as exc:
             stats.errors += 1
             error_examples.append(f"{rec.relative_name}: {exc}")
@@ -576,10 +1072,14 @@ def _run_install_missing(
 
     if run_mode == "dry_run":
         header = "Dry run complete."
-        changed = "No files were changed."
+        changed = "No thumbnail or source-image files were changed. The internal source index may have been updated."
     else:
         header = "🎨 Install complete." if stats.installed > 0 else "Install complete."
-        changed = "Thumbnail JPEG files were written next to checkpoint files."
+        changed = (
+            "Thumbnail JPEG files were written next to checkpoint files."
+            if stats.installed > 0
+            else "No thumbnail files were written."
+        )
 
     report: List[str] = [
         header,
@@ -596,12 +1096,20 @@ def _run_install_missing(
         "",
         changed,
     ]
-    if scan_summary.get("scan_limit_reached"):
+    report.extend([
+        "",
+        f"Source index buckets: {scan_summary.get('buckets', 0)}",
+        f"Index cache hits: {scan_summary.get('cache_hits', 0)}",
+        f"Index negative hits: {scan_summary.get('negative_hits', 0)}",
+        f"Buckets scanned: {scan_summary.get('buckets_scanned', 0)}",
+        f"Source images scanned: {scan_summary.get('files_seen', 0)}",
+    ])
+    if scan_summary.get("save_error"):
         report.extend([
             "",
-            f"Scan limit reached: {MAX_SCAN_SOURCE_IMAGES} images.",
-            "Some matching images may exist after the scan limit.",
-            "Try narrowing source_image_root.",
+            "Warning: source index could not be saved.",
+            str(scan_summary.get("save_error")),
+            "The source lookup result is still usable for this run.",
         ])
     if stats.missing_thumbnails > 0 and stats.unmatched == stats.missing_thumbnails:
         report.extend([
@@ -613,6 +1121,7 @@ def _run_install_missing(
         ])
 
     report.extend(_format_examples("Examples:", install_examples))
+    report.extend(_format_examples("Existing thumbnails preserved:", existing_examples))
     report.extend(_format_examples("Unmatched checkpoints:", unmatched_examples))
     report.extend(_format_examples("Errors:", error_examples))
 
@@ -628,10 +1137,12 @@ def _run_uninstall_managed(
     run_mode = str(payload.get("run_mode", "dry_run"))
     target_format = str(payload.get("target_format", TARGET_OGN))
     stats = ExportStats()
+    confirmed_snapshot: Dict[str, Tuple[int, int, int, int]] = {}
 
     if run_mode == "execute":
         token = str(payload.get("confirm_token", ""))
-        if not _consume_confirm_token(token, payload):
+        confirmation = _consume_confirm_token(token, payload)
+        if confirmation is None:
             report = "\n".join([
                 "Uninstall was requested, but confirmation is missing or expired.",
                 "",
@@ -640,12 +1151,18 @@ def _run_uninstall_managed(
             ])
             _send_progress(progress_cb, node_id, "done", 0, 0, "Confirmation missing. No files were removed.", "")
             return {"ok": False, "stats": stats.__dict__, "report": report, "confirm_token": None}
+        raw_snapshot = confirmation.get("managed_snapshot", {})
+        if isinstance(raw_snapshot, dict):
+            for path_text, identity in raw_snapshot.items():
+                if isinstance(identity, (list, tuple)) and len(identity) == 4:
+                    confirmed_snapshot[str(path_text)] = tuple(_as_int(value) for value in identity)
 
     records = _get_checkpoint_records()
     stats.checkpoints = len(records)
     managed_examples: List[str] = []
     skipped_examples: List[str] = []
     error_examples: List[str] = []
+    managed_snapshot: Dict[str, Tuple[int, int, int, int]] = {}
 
     for index, rec in enumerate(records, start=1):
         _send_progress(progress_cb, node_id, "checking_managed", index, len(records), "Checking managed thumbnails...", rec.relative_name)
@@ -662,7 +1179,16 @@ def _run_uninstall_managed(
         if run_mode == "dry_run":
             stats.would_remove += 1
             managed_examples.append(f"{rec.relative_name} -> {thumb.name}")
+            identity = _file_identity(thumb)
+            if identity is not None:
+                managed_snapshot[_confirmation_path(thumb)] = identity
         else:
+            path_key = _confirmation_path(thumb)
+            if confirmed_snapshot.get(path_key) != _file_identity(thumb):
+                stats.skipped_unmanaged += 1
+                if len(skipped_examples) < 8:
+                    skipped_examples.append(f"{rec.relative_name} -> {thumb.name} (not confirmed or changed after dry run)")
+                continue
             try:
                 thumb.unlink()
                 stats.removed += 1
@@ -675,13 +1201,13 @@ def _run_uninstall_managed(
 
     confirm_token = None
     if run_mode == "dry_run":
-        confirm_token = _make_confirm_token(payload)
+        confirm_token = _make_confirm_token(payload, managed_snapshot)
         header = "Dry run complete."
         changed = "No files were removed."
         action_line = f"Would remove: {stats.would_remove}"
     else:
         header = "❌ Uninstall complete." if stats.removed > 0 else "Uninstall complete."
-        changed = "Managed thumbnails were removed."
+        changed = "Managed thumbnails were removed." if stats.removed > 0 else "No managed thumbnails were removed."
         action_line = f"Removed: {stats.removed}"
 
     report: List[str] = [
@@ -704,7 +1230,7 @@ def _run_uninstall_managed(
     return {"ok": stats.errors == 0, "stats": stats.__dict__, "report": "\n".join(report), "confirm_token": confirm_token}
 
 
-def _run_exporter(payload: Dict[str, object], progress_cb: Optional[ProgressCallback] = None) -> Dict[str, object]:
+def _run_exporter_unlocked(payload: Dict[str, object], progress_cb: Optional[ProgressCallback] = None) -> Dict[str, object]:
     operation = str(payload.get("operation", "install_missing"))
     run_mode = str(payload.get("run_mode", "dry_run"))
     target_format = str(payload.get("target_format", TARGET_OGN))
@@ -718,6 +1244,20 @@ def _run_exporter(payload: Dict[str, object], progress_cb: Optional[ProgressCall
     if operation == "uninstall_managed":
         return _run_uninstall_managed(payload=payload, progress_cb=progress_cb)
     return {"ok": False, "stats": {}, "report": f"Unsupported operation: {operation}", "confirm_token": None}
+
+
+def _run_exporter(payload: Dict[str, object], progress_cb: Optional[ProgressCallback] = None) -> Dict[str, object]:
+    if not _EXPORTER_RUN_LOCK.acquire(blocking=False):
+        return {
+            "ok": False,
+            "stats": {},
+            "report": "Another Checkpoint Thumbnail Exporter operation is already running.\n\nTry again after it finishes.",
+            "confirm_token": None,
+        }
+    try:
+        return _run_exporter_unlocked(payload, progress_cb)
+    finally:
+        _EXPORTER_RUN_LOCK.release()
 
 
 @PromptServer.instance.routes.post("/checkpoint-thumbnail-exporter/run")
