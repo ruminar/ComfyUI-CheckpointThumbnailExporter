@@ -1092,10 +1092,11 @@ def _run_install_missing(
         f"Missing thumbnails: {stats.missing_thumbnails}",
         f"Would install: {stats.would_install}" if run_mode == "dry_run" else f"Installed: {stats.installed}",
         f"Unmatched: {stats.unmatched}",
-        f"Errors: {stats.errors}",
-        "",
-        changed,
     ]
+    report.extend(_format_examples("Unmatched checkpoints:", unmatched_examples))
+    report.append(f"Errors: {stats.errors}")
+    report.extend(_format_examples("Error checkpoints:", error_examples))
+    report.extend(["", changed])
     report.extend([
         "",
         f"Source index buckets: {scan_summary.get('buckets', 0)}",
@@ -1122,8 +1123,6 @@ def _run_install_missing(
 
     report.extend(_format_examples("Examples:", install_examples))
     report.extend(_format_examples("Existing thumbnails preserved:", existing_examples))
-    report.extend(_format_examples("Unmatched checkpoints:", unmatched_examples))
-    report.extend(_format_examples("Errors:", error_examples))
 
     return {"ok": stats.errors == 0, "stats": stats.__dict__, "report": "\n".join(report), "confirm_token": None}
 
@@ -1220,12 +1219,11 @@ def _run_uninstall_managed(
         action_line,
         f"Unmanaged/manual thumbnails skipped: {stats.skipped_unmanaged}",
         f"Errors: {stats.errors}",
-        "",
-        changed,
     ]
+    report.extend(_format_examples("Error checkpoints:", error_examples))
+    report.extend(["", changed])
     report.extend(_format_examples("Managed thumbnails:", managed_examples))
     report.extend(_format_examples("Skipped unmanaged/manual thumbnails:", skipped_examples))
-    report.extend(_format_examples("Errors:", error_examples))
 
     return {"ok": stats.errors == 0, "stats": stats.__dict__, "report": "\n".join(report), "confirm_token": confirm_token}
 

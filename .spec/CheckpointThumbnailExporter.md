@@ -119,6 +119,20 @@ Execute reports use the icon only if the corresponding action actually changed f
 - `🎨 Install complete.` only when one or more thumbnails were written.
 - `❌ Uninstall complete.` only when one or more managed thumbnails were removed.
 
+Install reports place affected checkpoint names immediately after their summary counts:
+
+```text
+Unmatched: 2
+Unmatched checkpoints:
+  - AAA.safetensors
+  - BBB.safetensors
+Errors: 1
+Error checkpoints:
+  - CCC.safetensors: <error detail>
+```
+
+This order is intentional: users should be able to read an unmatched checkpoint name and move directly to HandpickerSuite PushLocalList without searching the bottom of a long report. Uninstall error names follow the same `Errors:` / `Error checkpoints:` order.
+
 Initial Ready report text is fixed and should remain compact:
 
 ```text

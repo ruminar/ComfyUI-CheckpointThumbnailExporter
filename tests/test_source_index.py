@@ -341,6 +341,53 @@ class PersistentSourceIndexTests(unittest.TestCase):
                 comment = image.info["comment"].decode("utf-8")
             self.assertIn("comment_schema=cte_comment_v1", comment)
 
+    def test_install_report_places_checkpoint_names_immediately_after_unmatched_and_errors(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            checkpoint = root / "models" / "AAA.safetensors"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_bytes(b"checkpoint")
+            source_root = root / "empty-source"
+            source_root.mkdir()
+            index_path = root / "source_index.json"
+
+            def get_full_path(_kind, relative_name):
+                return str(checkpoint) if relative_name == "AAA.safetensors" else None
+
+            payload = {
+                "node_id": "test",
+                "source_image_root": str(source_root),
+                "target_format": cte.TARGET_OGN,
+                "operation": "install_missing",
+                "run_mode": "dry_run",
+                "max_size": 512,
+                "jpeg_quality": 90,
+            }
+            with (
+                mock.patch.object(cte, "_source_index_path", return_value=index_path),
+                mock.patch.object(cte.folder_paths, "get_filename_list", return_value=["AAA.safetensors"]),
+                mock.patch.object(cte.folder_paths, "get_full_path", side_effect=get_full_path),
+            ):
+                unmatched = cte._run_install_missing(payload=payload, progress_cb=None)
+
+                source_image = source_root / "20260825" / "AAA.png"
+                source_image.parent.mkdir()
+                Image.new("RGB", (8, 8), "red").save(source_image)
+                with mock.patch.object(cte, "_create_thumbnail", side_effect=OSError("forced write failure")):
+                    errored = cte._run_install_missing(
+                        payload={**payload, "run_mode": "execute"},
+                        progress_cb=None,
+                    )
+
+            self.assertIn(
+                "Unmatched: 1\nUnmatched checkpoints:\n  - AAA.safetensors\nErrors: 0",
+                unmatched["report"],
+            )
+            self.assertIn(
+                "Unmatched: 0\nErrors: 1\nError checkpoints:\n  - AAA.safetensors: forced write failure",
+                errored["report"],
+            )
+
     def test_thumbnail_creation_never_overwrites_existing_sidecar(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

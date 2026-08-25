@@ -19,6 +19,7 @@
 - Thumbnail publication now uses unique temporary files and never overwrites a sidecar created during scanning.
 - Managed-thumbnail detection now requires exact stable-schema marker lines.
 - Uninstall confirmation is bound to the exact managed files observed during dry run.
+- Install reports now list checkpoint names immediately below `Unmatched:` and `Errors:` for a direct PushLocalList workflow.
 
 ## 0.1.0
 

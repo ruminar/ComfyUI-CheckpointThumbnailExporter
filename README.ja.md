@@ -132,6 +132,8 @@ run_mode
 
 キャッシュ済み代表画像が削除された場合は、そのCheckpointエントリーだけを局所修復する。日付ディレクトリがHDD退避などで `source_image_root` 外へ移動した場合は、その日付エントリーを遅延削除する。
 
+Reportでは `Unmatched:` と `Errors:` のそれぞれの直下に対象Checkpoint名を表示する。unmatchedの名前を見てHandpickerSuiteのPushLocalListでソース画像を生成し、もう一度Exporterを実行すれば、変更された日付バケットをそのCheckpointについて再走査する流れじゃ。
+
 ---
 
 ## ❌ 安全すぎるアンインストール（管理マーカーのケジメ）

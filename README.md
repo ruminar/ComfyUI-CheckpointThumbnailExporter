@@ -241,6 +241,8 @@ Source lookup uses a disposable JSON index under the ComfyUI user directory. The
 
 Valid cached representatives are reused without requiring an exact global-newest image. If a cached representative is deleted, only that checkpoint entry is repaired. If a date directory is moved outside `source_image_root`, its date entry is removed lazily.
 
+The report lists checkpoint names immediately below `Unmatched:` and `Errors:`. Use an unmatched name with HandpickerSuite PushLocalList to generate a source image, then run the exporter again; a changed date bucket is rescanned for that checkpoint.
+
 ## OGN-ModelManager refresh
 
 This node only places files where OGN-ModelManager already looks for them.
