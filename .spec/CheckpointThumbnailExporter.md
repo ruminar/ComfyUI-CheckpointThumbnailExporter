@@ -25,7 +25,7 @@ Run HandpickerSuite first
 ↓
 Checkpoint-specific images accumulate
 ↓
-Checkpoint Thumbnail Exporter selects the latest image for each checkpoint
+Checkpoint Thumbnail Exporter selects a recent representative image for each checkpoint
 ↓
 Missing OGN-ModelManager thumbnails are installed automatically
 ```
@@ -119,6 +119,28 @@ Execute reports use the icon only if the corresponding action actually changed f
 - `🎨 Install complete.` only when one or more thumbnails were written.
 - `❌ Uninstall complete.` only when one or more managed thumbnails were removed.
 
+Install reports place affected checkpoint names immediately after their summary counts:
+
+```text
+Unmatched: 2
+Unmatched checkpoints:
+  - AAA.safetensors
+  - BBB.safetensors
+Errors: 1
+Error checkpoints:
+  - CCC.safetensors: <error detail>
+```
+
+This order is intentional: users should be able to read an unmatched checkpoint name and move directly to HandpickerSuite PushLocalList without searching the bottom of a long report. Uninstall error names follow the same `Errors:` / `Error checkpoints:` order.
+
+The report area is a read-only, selectable text area. Users may select text and copy it with keyboard shortcuts or the context menu, but they must not be able to edit it. A canvas-rendered report is only a compatibility fallback when the running ComfyUI frontend does not provide DOM widgets.
+
+While the report area has focus, `Ctrl+S` / `Cmd+S` must be consumed so the browser does not open its HTML save dialog. Selection and copy shortcuts such as `Ctrl+A` / `Cmd+A` and `Ctrl+C` / `Cmd+C` remain available.
+
+Existing thumbnails are reported by count only. Do not append an `Existing thumbnails preserved:` example list because it has no exceptional meaning and can bury the actionable unmatched and error lists.
+
+Do not append a generic `Hint:` section when all missing checkpoints are unmatched. The checkpoint names immediately below `Unmatched:` are the intended handoff to HandpickerSuite PushLocalList; persistent troubleshooting guidance belongs in the README instead of every result.
+
 Initial Ready report text is fixed and should remain compact:
 
 ```text
@@ -134,7 +156,8 @@ Button behavior = operation + run_mode.
   dry_run : find managed thumbnails
   execute : uninstall managed thumbnails
 
-dry_run changes nothing.
+dry_run does not modify thumbnails or source images.
+The internal source index may be updated.
 Empty source_image_root uses ComfyUI output.
 ```
 
@@ -162,7 +185,6 @@ Constants:
 ```python
 SCAN_PROGRESS_DOT_EVERY_FILES = 100
 SCAN_PROGRESS_MAX_DOTS = 120
-MAX_SCAN_SOURCE_IMAGES = 5000
 ```
 
 Rationale:
@@ -170,8 +192,7 @@ Rationale:
 - Counting all source files up front would require an extra full scan.
 - A simple dot heartbeat keeps the node responsive and makes long unmatched scans understandable.
 - The text labels avoid confusion between source-image hits and matched-checkpoint count.
-- The scan limit prevents very broad source roots from turning into an unexpectedly long operation.
-- The scan limit is shown only if reached, because showing it during normal progress can be mistaken for total file count.
+- Full and targeted bucket scans have no image-count limit. A capped scan must never become a trustworthy negative cache.
 
 ## Safety UI rules
 
@@ -180,6 +201,7 @@ Rationale:
 - `uninstall_managed + execute` requires a fresh `uninstall_managed + dry_run` confirmation token.
 - The confirmation token expires after 10 minutes.
 - If uninstall confirmation is missing or expired, no files are removed.
+- The token records the exact managed-thumbnail path and file identity seen during dry run. Execute skips newly created or changed thumbnails that were not part of that snapshot.
 
 ## source_image_root behavior
 
@@ -222,10 +244,12 @@ Important rule: check target thumbnails first.
 1. Get ComfyUI checkpoint list.
 2. For each checkpoint, check whether an OGN-compatible sidecar thumbnail already exists.
 3. If every checkpoint already has a thumbnail, do not scan source_image_root.
-4. Only for missing thumbnails, scan source_image_root.
-5. Find the latest source image for each missing checkpoint.
-6. dry_run: report what would be installed.
-7. execute: write resized .jpg thumbnail next to the checkpoint file.
+4. Only for missing thumbnails, load and update the persistent source index.
+5. Reuse valid indexed representatives and negative-cache results.
+6. Scan only new, changed, fallback, or locally damaged buckets as needed.
+7. Select a recent representative image for each matched checkpoint.
+8. dry_run: update the internal index and report what would be installed, but do not modify thumbnails or source images.
+9. execute: reuse the warmed index and write resized .jpg thumbnails next to checkpoint files.
 ```
 
 Existing sidecar thumbnail detection:
@@ -251,6 +275,8 @@ Output format:
 - keep aspect ratio
 - max side = `max_size`
 - quality = `jpeg_quality`
+- render to a unique same-directory temporary file, then publish without overwriting an existing sidecar
+- if a sidecar appears after the initial target check, preserve it and skip that install result
 
 ## Source image matching
 
@@ -267,7 +293,7 @@ foo.safetensors -> foo
 illustrious/foo.safetensors -> illustrious_foo, foo
 ```
 
-`source_image_root` is scanned once, and only if at least one checkpoint is missing a thumbnail.
+`source_image_root` is indexed only if at least one checkpoint is missing a thumbnail.
 
 Source image matching supports substring matching against the checkpoint-safe key because HandpickerSuite / GM Image Saver output layouts vary:
 
@@ -287,15 +313,87 @@ Match priority:
 3. normalized relative path contains ckpt_name_safe
 ```
 
-If one source image matches multiple checkpoints at the same best priority, it is skipped as ambiguous. If several images match the same checkpoint, the latest image wins.
+If one source image matches multiple checkpoints at the same best priority, it is skipped as ambiguous.
 
-Representative rule is fixed:
+When a bucket is scanned without a cached representative, the preferred candidate is:
 
 ```text
 latest
 ```
 
-Latest means highest file modification time, with filename as tie-breaker.
+`latest` means highest file modification time, with filename as tie-breaker, among the images inspected in that bucket. Once a valid representative is cached, it remains selected even when newer unrelated or matching images appear. Mathematical global-newest selection is not required.
+
+## Persistent source index
+
+The filesystem remains the source of truth. The JSON index is a disposable accelerator.
+
+Conceptual location:
+
+```text
+<ComfyUI user directory>/
+  CheckpointThumbnailExporter/
+    source_index.json
+```
+
+The index uses one active normalized `source_root`. If the widget points to a different root, the old JSON content is discarded and rebuilt for the new root. A schema-version change also rebuilds the index.
+
+### Bucket discovery and order
+
+Directory discovery walks downward without following symlinked directories.
+
+- A directory whose name is a valid calendar date in `YYYYMMDD` form becomes a `date` bucket.
+- Discovery does not descend below a date bucket.
+- Source images outside date buckets are grouped by their first-level directory into `fallback` buckets.
+- Source images directly under `source_root` use the synthetic `root` bucket with path `.`.
+- A fallback scan prunes every date-directory branch below it, preventing duplicate scanning.
+
+Date buckets are ordered by parsed date descending. For equal dates, the parent-prefix directory modification time is compared, followed by relative path for a deterministic tie-breaker. Fallback buckets are ordered by first-level directory modification time. The saved JSON entry order is the lookup order.
+
+### Full and targeted scans
+
+A newly discovered or uninitialized bucket performs a full scan against the current checkpoint catalog. The bucket becomes initialized only after a complete, stable scan. An unvisited older bucket remains uninitialized and receives its full scan when lookup first needs it.
+
+An existing bucket performs a targeted scan against only the currently unresolved checkpoint or checkpoint batch when:
+
+- its negative cache is stale;
+- a cached representative was deleted or became unsafe;
+- the current checkpoint catalog differs from the catalog used by the last full scan.
+
+All bucket scans are exhaustive and have no image-count cap.
+
+### Positive and negative caches
+
+A positive cache stores one representative image path per checkpoint per bucket. The path must remain relative to and contained within the bucket, be a regular file, and use a supported source-image extension. A valid positive cache is used immediately without checking directory mtime.
+
+A date-bucket negative result is trusted only when its recorded `dir_mtime_ns` equals the current date-directory mtime. A stable full scan may use a catalog signature to cover all checkpoints present during that scan. New checkpoint names fall back to a targeted scan instead of inheriting an old catalog's negative result.
+
+Fallback and root buckets reuse positive entries but do not persist strong negative-cache conclusions. Unmatched fallback lookups may therefore rescan those buckets. This preserves support for directory patterns whose nested file changes do not update the first-level directory mtime.
+
+### PushLocalList guarantee
+
+Historical source-image discovery is best effort. If a previously unmatched checkpoint receives a new image from HandpickerSuite PushLocalList under the current date directory, the changed date-directory mtime invalidates that checkpoint's negative cache. The next lookup performs an uncapped targeted scan and must discover the new image.
+
+For date-bucket negative results, the directory mtime is read before and after scanning. If it changes during the scan, the scan is retried up to three times and no negative result is persisted unless a scan completes with a stable mtime.
+
+Adding an image inside a pre-existing nested label directory may not change the ancestor date-directory mtime on every filesystem. This edge case may require another observable directory change or rebuilding the disposable index. Existing valid positive representatives intentionally remain unchanged when more images are added.
+
+### Local repair and deletion
+
+```text
+date directory missing
+→ remove the whole date entry
+
+representative image missing or unsafe
+→ remove only that checkpoint entry
+→ rescan that bucket for that checkpoint
+
+new date directory
+→ create and initialize only the new bucket when lookup reaches it
+```
+
+Index writes use a unique temporary file, flush and close it, then publish it with `os.replace`. Save failure must not invalidate the in-memory lookup result and must leave the previous valid index intact when possible.
+
+Only one exporter operation may run in a ComfyUI process at a time. Lock acquisition is non-blocking: the first operation proceeds and later concurrent requests receive a busy error. The lock is always released in `finally`.
 
 ## JPEG comment
 
@@ -326,7 +424,7 @@ Tag/favorite metadata is intentionally not included in 0.1.0. It can be added la
 1. Get ComfyUI checkpoint list.
 2. Find sidecar thumbnails next to each checkpoint.
 3. For `.jpg` / `.jpeg`, read JPEG comment.
-4. If it contains this node's management marker, it is managed.
+4. Treat it as managed only when the tool name, `managed=true`, stable comment schema, and target marker all appear as exact comment lines.
 5. dry_run: report managed thumbnails.
 6. execute: remove managed thumbnails only.
 ```
@@ -362,7 +460,7 @@ This keeps the operation set small and preserves the rule that manual/unmanaged 
 
 - OGN-ModelManager only
 - `.jpg` output only
-- representative rule fixed to `latest`
+- cold-scan candidate preference fixed to `latest`; valid cached representatives remain stable
 - no overwrite mode
 - no Civitai download
 - no tag/favorite overlay burn-in
@@ -376,6 +474,8 @@ This keeps the operation set small and preserves the rule that manual/unmanaged 
 - Do not write temporary build labels into JPEG comments.
 - Preserve the OGN integration boundary: file placement only, no OGN API/cache mutation.
 - Preserve the target-first optimization: do not scan `source_image_root` if no thumbnails are missing.
+- Preserve the PushLocalList recovery rule: changed date buckets invalidate affected negative cache results and are rescanned without an image-count cap.
+- Treat the source index as disposable and never as the source of truth.
 - Preserve the one-button utility-panel design.
 - If `operation` changes, reset `run_mode` to `dry_run`.
 - If `execute` finishes, reset `run_mode` to `dry_run`.
