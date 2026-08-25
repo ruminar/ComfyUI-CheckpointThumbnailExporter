@@ -6,8 +6,6 @@
 - Node display name: `Checkpoint Thumbnail Exporter`
 - Internal node class: `CheckpointThumbnailExporter`
 
-`TOOL_BUILD` is a ChatGPT-assisted zip/build label only. It must not be written into generated JPEG comments.
-
 Stable JPEG metadata uses:
 
 ```text
@@ -202,6 +200,8 @@ Rationale:
 - The confirmation token expires after 10 minutes.
 - If uninstall confirmation is missing or expired, no files are removed.
 - The token records the exact managed-thumbnail path and file identity seen during dry run. Execute skips newly created or changed thumbnails that were not part of that snapshot.
+- On Windows, execute opens the candidate with write/delete sharing denied, compares the opened handle's identity with the dry-run snapshot, and marks that same handle for deletion. The path cannot be replaced between identity validation and deletion.
+- On POSIX systems, execute atomically moves the current path entry to a unique quarantine name, validates that detached file object's identity, and deletes it only on a match. A replacement created at the original path is not touched. A mismatched object is restored without overwriting another file when the original path remains free; otherwise it is preserved at the quarantine path and reported as an error.
 
 ## source_image_root behavior
 
@@ -414,9 +414,7 @@ representative_rule=latest
 created_at=2026-06-11T01:23:45+0900
 ```
 
-Do not include `TOOL_BUILD` or temporary zip labels in JPEG comments.
-
-Tag/favorite metadata is intentionally not included in 0.1.0. It can be added later only if users ask for tag overlays or thumbnail style refresh.
+Tag/favorite metadata is intentionally not included in 0.2.0. It can be added later only if users ask for tag overlays or thumbnail style refresh.
 
 ## uninstall_managed algorithm
 
@@ -445,7 +443,7 @@ Recommended deletion-script sidecar cleanup:
 
 ## Refresh managed thumbnails
 
-There is intentionally no separate `refresh_managed` operation in 0.1.0.
+There is intentionally no separate `refresh_managed` operation in 0.2.0.
 
 To refresh thumbnails managed by this node:
 
@@ -471,7 +469,6 @@ This keeps the operation set small and preserves the rule that manual/unmanaged 
 
 - Keep specs under `.spec/*.md`, not as `*.spec` files.
 - Update this spec when UI or behavior changes.
-- Do not write temporary build labels into JPEG comments.
 - Preserve the OGN integration boundary: file placement only, no OGN API/cache mutation.
 - Preserve the target-first optimization: do not scan `source_image_root` if no thumbnails are missing.
 - Preserve the PushLocalList recovery rule: changed date buckets invalidate affected negative cache results and are rescanned without an image-count cap.

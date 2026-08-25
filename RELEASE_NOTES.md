@@ -1,6 +1,8 @@
 # Release Notes
 
-## Unreleased
+## 0.2.0 - 2026-08-25
+
+This release makes large source-image libraries fast to search, improves the PushLocalList recovery workflow, and hardens thumbnail installation and managed-thumbnail removal against concurrent file changes.
 
 ### Added
 
@@ -22,6 +24,8 @@
 - Install reports now list checkpoint names immediately below `Unmatched:` and `Errors:` for a direct PushLocalList workflow.
 - The in-node report is now selectable and copyable while remaining read-only, and the generic unmatched `Hint:` footer has been removed.
 - Existing-thumbnail example lists have been removed in favor of the existing count, and `Ctrl+S` / `Cmd+S` is suppressed while the report has focus.
+- Uninstall now deletes only the exact dry-run-confirmed file object: Windows uses one replacement-blocking handle, while POSIX atomically quarantines and validates the path entry before deletion.
+- Execute reports now state accurately when zero thumbnail files were written or removed.
 
 ## 0.1.0
 

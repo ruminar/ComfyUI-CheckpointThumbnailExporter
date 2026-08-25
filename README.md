@@ -1,5 +1,7 @@
 # ComfyUI-CheckpointThumbnailExporter
 
+[日本語](README.ja.md)
+
 `Checkpoint Thumbnail Exporter` is a standalone ComfyUI utility node for creating missing checkpoint thumbnails for `OGN-ModelManager` from checkpoint-associated generated image folders.
 
 It is meant for this workflow:
@@ -97,7 +99,7 @@ Leave empty to use the current ComfyUI output folder.
 target_format
 ```
 
-Version 0.1.0 supports only:
+Version 0.2.0 supports only:
 
 ```text
 OGN-ModelManager
@@ -185,6 +187,8 @@ Report first-line icons are intentionally stricter than button icons:
 
 Manual thumbnails, OGN-uploaded thumbnails, and unmanaged sidecar images are skipped.
 
+Uninstall dry run records each managed thumbnail's path and file identity. On Windows, execute locks the exact file object against replacement, validates that opened object against the dry-run snapshot, and deletes through the same handle. POSIX systems atomically detach and validate the exact path entry before deletion. Newly created, changed, or concurrently replaced files are not deleted.
+
 For safety, `uninstall_managed + execute` requires a fresh `uninstall_managed + dry_run` first. The confirmation expires after 10 minutes.
 The confirmation is bound to the managed thumbnail files seen by that dry run; newly created or changed files are skipped.
 
@@ -194,7 +198,7 @@ The confirmation is bound to the managed thumbnail files seen by that dry run; n
 
 If all checkpoints already have thumbnails, `source_image_root` is not scanned.
 
-Existing thumbnails are not overwritten in version 0.1.0.
+Existing thumbnails are never overwritten.
 
 To refresh thumbnails managed by this node, run `uninstall_managed` first, then run `install_missing` again. Manual or unmanaged thumbnails are not removed and will not be overwritten.
 
@@ -255,7 +259,7 @@ If all checkpoints are reported as unmatched, first check `source_image_root`.
 
 When `source_image_root` is empty, the exporter uses the current ComfyUI output directory only. If GM Image Saver is configured with an explicit output folder, or if your ComfyUI `output` folder is expected to be a junction/symlink, verify that it still points to the folder that actually contains generated images.
 
-## 0.1.0 scope
+## 0.2.0 scope
 
 - OGN-ModelManager only
 - `.jpg` output only
@@ -274,4 +278,4 @@ It does not call OGN-ModelManager thumbnail APIs and does not modify OGN-ModelMa
 
 ## Development note
 
-This project keeps implementation specs under `.spec/*.md`. The zip/build label (`TOOL_BUILD`, for example `v1e`) is intentionally not written to JPEG comments because build labels may change frequently during ChatGPT-assisted iterations. Generated JPEG comments use a stable `comment_schema=cte_comment_v1` marker instead.
+This project keeps implementation specs under `.spec/*.md`. Generated JPEG comments use the stable `comment_schema=cte_comment_v1` marker for managed-thumbnail compatibility.

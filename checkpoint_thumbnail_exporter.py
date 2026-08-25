@@ -30,8 +30,6 @@ import folder_paths
 from server import PromptServer
 
 TOOL_NAME = "Checkpoint Thumbnail Exporter"
-# TOOL_BUILD is only for reports / debugging. It is intentionally not written to JPEG comments.
-TOOL_BUILD = "v1g"
 # Stable comment schema used for managed thumbnail ownership checks.
 COMMENT_SCHEMA = "cte_comment_v1"
 MANAGED_MARKER = "managed=true"
@@ -96,6 +94,10 @@ def _file_identity(path: Path) -> Optional[Tuple[int, int, int, int]]:
         stat = path.stat()
     except OSError:
         return None
+    return _stat_identity(stat)
+
+
+def _stat_identity(stat: os.stat_result) -> Tuple[int, int, int, int]:
     return (int(stat.st_dev), int(stat.st_ino), int(stat.st_size), int(stat.st_mtime_ns))
 
 
@@ -104,6 +106,132 @@ def _confirmation_path(path: Path) -> str:
         return os.path.normcase(str(path.resolve()))
     except OSError:
         return os.path.normcase(str(path.absolute()))
+
+
+def _open_windows_delete_fd(path: Path) -> int:
+    """Open one Windows file object while denying write/delete sharing."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    generic_read = 0x80000000
+    delete_access = 0x00010000
+    file_share_read = 0x00000001
+    open_existing = 3
+    file_attribute_normal = 0x00000080
+    file_flag_open_reparse_point = 0x00200000
+    invalid_handle_value = ctypes.c_void_p(-1).value
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    handle = create_file(
+        str(path),
+        generic_read | delete_access,
+        file_share_read,
+        None,
+        open_existing,
+        file_attribute_normal | file_flag_open_reparse_point,
+        None,
+    )
+    if handle == invalid_handle_value:
+        error = ctypes.get_last_error()
+        if error in {2, 3}:
+            raise FileNotFoundError(error, ctypes.FormatError(error), str(path))
+        raise ctypes.WinError(error)
+
+    try:
+        return msvcrt.open_osfhandle(handle, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    except Exception:
+        close_handle(handle)
+        raise
+
+
+def _mark_windows_fd_for_deletion(fd: int) -> None:
+    """Mark the exact file object held by fd for deletion on handle close."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class FileDispositionInfo(ctypes.Structure):
+        _fields_ = [("DeleteFile", ctypes.c_ubyte)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    set_file_information = kernel32.SetFileInformationByHandle
+    set_file_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    )
+    set_file_information.restype = wintypes.BOOL
+
+    disposition = FileDispositionInfo(1)
+    handle = msvcrt.get_osfhandle(fd)
+    if not set_file_information(handle, 4, ctypes.byref(disposition), ctypes.sizeof(disposition)):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _delete_confirmed_file(path: Path, expected_identity: Tuple[int, int, int, int]) -> bool:
+    """Delete only the file object whose identity was confirmed during dry run."""
+    if os.name == "nt":
+        try:
+            fd = _open_windows_delete_fd(path)
+        except FileNotFoundError:
+            return False
+        try:
+            if _stat_identity(os.fstat(fd)) != expected_identity:
+                return False
+            # The Windows handle denies write/delete sharing, so the path cannot be
+            # replaced between this identity check and handle-based deletion.
+            _mark_windows_fd_for_deletion(fd)
+            return True
+        finally:
+            os.close(fd)
+
+    # POSIX has no portable "unlink this inode if unchanged" primitive. Atomically
+    # detach whichever file object currently owns the path, then validate that
+    # detached object before deleting it. A concurrently created replacement at
+    # the original path is never touched.
+    quarantine = path.with_name(f".{path.name}.{secrets.token_hex(8)}.cte-delete")
+    try:
+        path.rename(quarantine)
+    except FileNotFoundError:
+        return False
+    if _file_identity(quarantine) != expected_identity:
+        try:
+            os.link(quarantine, path)
+            quarantine.unlink()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Changed file was preserved at {quarantine}; it could not be restored to {path}."
+            ) from exc
+        return False
+    try:
+        quarantine.unlink()
+    except Exception:
+        # Restore the confirmed file when deletion itself fails. Hard-link creation
+        # is exclusive and therefore never overwrites a concurrently created path.
+        try:
+            os.link(quarantine, path)
+            quarantine.unlink()
+        except Exception:
+            pass
+        raise
+    return True
 
 
 def _sanitize_name(value: str) -> str:
@@ -1168,15 +1296,20 @@ def _run_uninstall_managed(
                 managed_snapshot[_confirmation_path(thumb)] = identity
         else:
             path_key = _confirmation_path(thumb)
-            if confirmed_snapshot.get(path_key) != _file_identity(thumb):
+            expected_identity = confirmed_snapshot.get(path_key)
+            if expected_identity is None:
                 stats.skipped_unmanaged += 1
                 if len(skipped_examples) < 8:
                     skipped_examples.append(f"{rec.relative_name} -> {thumb.name} (not confirmed or changed after dry run)")
                 continue
             try:
-                thumb.unlink()
-                stats.removed += 1
-                managed_examples.append(f"{rec.relative_name} -> {thumb.name}")
+                if _delete_confirmed_file(thumb, expected_identity):
+                    stats.removed += 1
+                    managed_examples.append(f"{rec.relative_name} -> {thumb.name}")
+                else:
+                    stats.skipped_unmanaged += 1
+                    if len(skipped_examples) < 8:
+                        skipped_examples.append(f"{rec.relative_name} -> {thumb.name} (not confirmed or changed after dry run)")
             except Exception as exc:
                 stats.errors += 1
                 error_examples.append(f"{rec.relative_name}: {exc}")

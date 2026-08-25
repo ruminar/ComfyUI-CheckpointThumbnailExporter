@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import types
@@ -503,6 +504,48 @@ class PersistentSourceIndexTests(unittest.TestCase):
 
             self.assertFalse(thumbnail.exists())
             self.assertEqual(execute["stats"]["removed"], 1)
+
+    def test_confirmed_delete_preserves_file_changed_after_dry_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "AAA.jpg"
+            target.write_bytes(b"dry-run-version")
+            expected_identity = cte._file_identity(target)
+            self.assertIsNotNone(expected_identity)
+            target.write_bytes(b"changed-after-dry-run-and-longer")
+
+            removed = cte._delete_confirmed_file(target, expected_identity)
+
+            self.assertFalse(removed)
+            self.assertEqual(target.read_bytes(), b"changed-after-dry-run-and-longer")
+
+    @unittest.skipUnless(os.name == "nt", "Windows handle-sharing behavior")
+    def test_confirmed_delete_blocks_replacement_after_identity_check(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "AAA.jpg"
+            replacement = root / "replacement.jpg"
+            target.write_bytes(b"confirmed-thumbnail")
+            replacement.write_bytes(b"replacement-thumbnail")
+            expected_identity = cte._file_identity(target)
+            self.assertIsNotNone(expected_identity)
+
+            original_mark = cte._mark_windows_fd_for_deletion
+            replacement_error = []
+
+            def race_then_delete(fd):
+                try:
+                    os.replace(replacement, target)
+                except OSError as exc:
+                    replacement_error.append(exc)
+                return original_mark(fd)
+
+            with mock.patch.object(cte, "_mark_windows_fd_for_deletion", side_effect=race_then_delete):
+                removed = cte._delete_confirmed_file(target, expected_identity)
+
+            self.assertTrue(removed)
+            self.assertFalse(target.exists())
+            self.assertTrue(replacement.exists())
+            self.assertTrue(replacement_error)
 
 
 if __name__ == "__main__":
