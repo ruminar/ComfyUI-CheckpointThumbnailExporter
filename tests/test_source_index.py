@@ -347,12 +347,20 @@ class PersistentSourceIndexTests(unittest.TestCase):
             checkpoint = root / "models" / "AAA.safetensors"
             checkpoint.parent.mkdir(parents=True)
             checkpoint.write_bytes(b"checkpoint")
+            existing_checkpoint = root / "models" / "BBB.safetensors"
+            existing_checkpoint.write_bytes(b"checkpoint")
+            existing_checkpoint.with_suffix(".jpg").write_bytes(b"existing-thumbnail")
             source_root = root / "empty-source"
             source_root.mkdir()
             index_path = root / "source_index.json"
 
             def get_full_path(_kind, relative_name):
-                return str(checkpoint) if relative_name == "AAA.safetensors" else None
+                paths = {
+                    "AAA.safetensors": checkpoint,
+                    "BBB.safetensors": existing_checkpoint,
+                }
+                path = paths.get(relative_name)
+                return str(path) if path is not None else None
 
             payload = {
                 "node_id": "test",
@@ -365,7 +373,7 @@ class PersistentSourceIndexTests(unittest.TestCase):
             }
             with (
                 mock.patch.object(cte, "_source_index_path", return_value=index_path),
-                mock.patch.object(cte.folder_paths, "get_filename_list", return_value=["AAA.safetensors"]),
+                mock.patch.object(cte.folder_paths, "get_filename_list", return_value=["AAA.safetensors", "BBB.safetensors"]),
                 mock.patch.object(cte.folder_paths, "get_full_path", side_effect=get_full_path),
             ):
                 unmatched = cte._run_install_missing(payload=payload, progress_cb=None)
@@ -383,6 +391,10 @@ class PersistentSourceIndexTests(unittest.TestCase):
                 "Unmatched: 1\nUnmatched checkpoints:\n  - AAA.safetensors\nErrors: 0",
                 unmatched["report"],
             )
+            self.assertNotIn("Hint:", unmatched["report"])
+            self.assertNotIn("All missing checkpoints were unmatched.", unmatched["report"])
+            self.assertIn("Existing thumbnails: 1", unmatched["report"])
+            self.assertNotIn("Existing thumbnails preserved:", unmatched["report"])
             self.assertIn(
                 "Unmatched: 0\nErrors: 1\nError checkpoints:\n  - AAA.safetensors: forced write failure",
                 errored["report"],

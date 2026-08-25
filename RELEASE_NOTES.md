@@ -20,6 +20,8 @@
 - Managed-thumbnail detection now requires exact stable-schema marker lines.
 - Uninstall confirmation is bound to the exact managed files observed during dry run.
 - Install reports now list checkpoint names immediately below `Unmatched:` and `Errors:` for a direct PushLocalList workflow.
+- The in-node report is now selectable and copyable while remaining read-only, and the generic unmatched `Hint:` footer has been removed.
+- Existing-thumbnail example lists have been removed in favor of the existing count, and `Ctrl+S` / `Cmd+S` is suppressed while the report has focus.
 
 ## 0.1.0
 

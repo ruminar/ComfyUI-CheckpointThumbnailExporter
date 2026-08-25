@@ -151,7 +151,7 @@ uninstall_managed + dry_run -> ❌ [Dry Run] Find Managed Thumbnails
 uninstall_managed + execute -> ❌ [Execute!] Uninstall Managed Thumbnails
 ```
 
-A progress bar and report area are shown inside the node.
+A progress bar and read-only report area are shown inside the node. Report text can be selected and copied to another application, but cannot be edited. With the report focused, `Ctrl+S` / `Cmd+S` is suppressed instead of opening the browser's HTML save dialog.
 
 The initial report shows a compact guide:
 
@@ -241,7 +241,7 @@ Source lookup uses a disposable JSON index under the ComfyUI user directory. The
 
 Valid cached representatives are reused without requiring an exact global-newest image. If a cached representative is deleted, only that checkpoint entry is repaired. If a date directory is moved outside `source_image_root`, its date entry is removed lazily.
 
-The report lists checkpoint names immediately below `Unmatched:` and `Errors:`. Use an unmatched name with HandpickerSuite PushLocalList to generate a source image, then run the exporter again; a changed date bucket is rescanned for that checkpoint.
+The report lists checkpoint names immediately below `Unmatched:` and `Errors:` without appending a generic Hint footer. Existing thumbnails are shown as a count only, without a five-item example list. Use an unmatched name with HandpickerSuite PushLocalList to generate a source image, then run the exporter again; a changed date bucket is rescanned for that checkpoint.
 
 ## OGN-ModelManager refresh
 

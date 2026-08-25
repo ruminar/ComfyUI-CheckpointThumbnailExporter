@@ -993,15 +993,12 @@ def _run_install_missing(
     stats.checkpoints = len(records)
 
     missing: List[CheckpointRecord] = []
-    existing_examples: List[str] = []
 
     for index, rec in enumerate(records, start=1):
         _send_progress(progress_cb, node_id, "checking_thumbnails", index, len(records), "Checking existing thumbnails...", rec.relative_name)
         rec.existing_thumbnail = _find_existing_sidecar_thumbnail(rec.path)
         if rec.existing_thumbnail is not None:
             stats.existing_thumbnails += 1
-            if len(existing_examples) < 5:
-                existing_examples.append(f"{rec.relative_name} -> {rec.existing_thumbnail.name}")
         else:
             missing.append(rec)
 
@@ -1062,8 +1059,6 @@ def _run_install_missing(
             # A sidecar appeared after the initial target scan. Preserve it and treat
             # the checkpoint as an existing-thumbnail race rather than an error.
             stats.existing_thumbnails += 1
-            if len(existing_examples) < 5:
-                existing_examples.append(f"{rec.relative_name} -> {target_path.name} (created during scan)")
         except Exception as exc:
             stats.errors += 1
             error_examples.append(f"{rec.relative_name}: {exc}")
@@ -1112,17 +1107,7 @@ def _run_install_missing(
             str(scan_summary.get("save_error")),
             "The source lookup result is still usable for this run.",
         ])
-    if stats.missing_thumbnails > 0 and stats.unmatched == stats.missing_thumbnails:
-        report.extend([
-            "",
-            "Hint:",
-            "All missing checkpoints were unmatched.",
-            "Please check whether source_image_root points to the folder that actually contains generated images.",
-            "If you rely on a junction/symlinked output folder, verify that it still exists.",
-        ])
-
     report.extend(_format_examples("Examples:", install_examples))
-    report.extend(_format_examples("Existing thumbnails preserved:", existing_examples))
 
     return {"ok": stats.errors == 0, "stats": stats.__dict__, "report": "\n".join(report), "confirm_token": None}
 

@@ -133,6 +133,14 @@ Error checkpoints:
 
 This order is intentional: users should be able to read an unmatched checkpoint name and move directly to HandpickerSuite PushLocalList without searching the bottom of a long report. Uninstall error names follow the same `Errors:` / `Error checkpoints:` order.
 
+The report area is a read-only, selectable text area. Users may select text and copy it with keyboard shortcuts or the context menu, but they must not be able to edit it. A canvas-rendered report is only a compatibility fallback when the running ComfyUI frontend does not provide DOM widgets.
+
+While the report area has focus, `Ctrl+S` / `Cmd+S` must be consumed so the browser does not open its HTML save dialog. Selection and copy shortcuts such as `Ctrl+A` / `Cmd+A` and `Ctrl+C` / `Cmd+C` remain available.
+
+Existing thumbnails are reported by count only. Do not append an `Existing thumbnails preserved:` example list because it has no exceptional meaning and can bury the actionable unmatched and error lists.
+
+Do not append a generic `Hint:` section when all missing checkpoints are unmatched. The checkpoint names immediately below `Unmatched:` are the intended handoff to HandpickerSuite PushLocalList; persistent troubleshooting guidance belongs in the README instead of every result.
+
 Initial Ready report text is fixed and should remain compact:
 
 ```text
