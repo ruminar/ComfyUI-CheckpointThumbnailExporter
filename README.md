@@ -1,5 +1,7 @@
 # ComfyUI-CheckpointThumbnailExporter
 
+[日本語](README.ja.md)
+
 `Checkpoint Thumbnail Exporter` is a standalone ComfyUI utility node for creating missing checkpoint thumbnails for `OGN-ModelManager` from checkpoint-associated generated image folders.
 
 It is meant for this workflow:
@@ -9,7 +11,7 @@ Generate images associated with each checkpoint
 ↓
 Checkpoint-specific images accumulate
 ↓
-Checkpoint Thumbnail Exporter picks the latest image for each checkpoint
+Checkpoint Thumbnail Exporter picks a recent representative image for each checkpoint
 ↓
 Missing OGN-ModelManager thumbnails are installed automatically
 ```
@@ -21,7 +23,7 @@ It works especially well with HandpickerSuite / GM Image Saver workflows, but th
 - Gets the ComfyUI checkpoint list.
 - Checks whether each checkpoint already has an OGN-compatible sidecar thumbnail.
 - Scans source image folders only for checkpoints without thumbnails.
-- Uses the latest source image for each checkpoint.
+- Uses a recent source image for each checkpoint and keeps valid indexed representatives stable.
 - Writes a resized `.jpg` next to the checkpoint file.
 - Adds a JPEG comment so it can later uninstall only thumbnails created by this node.
 - Does not touch OGN-ModelManager internals, cache, or private APIs.
@@ -97,7 +99,7 @@ Leave empty to use the current ComfyUI output folder.
 target_format
 ```
 
-Version 0.1.0 supports only:
+Version 0.2.0 supports only:
 
 ```text
 OGN-ModelManager
@@ -151,7 +153,7 @@ uninstall_managed + dry_run -> ❌ [Dry Run] Find Managed Thumbnails
 uninstall_managed + execute -> ❌ [Execute!] Uninstall Managed Thumbnails
 ```
 
-A progress bar and report area are shown inside the node.
+A progress bar and read-only report area are shown inside the node. Report text can be selected and copied to another application, but cannot be edited. With the report focused, `Ctrl+S` / `Cmd+S` is suppressed instead of opening the browser's HTML save dialog.
 
 The initial report shows a compact guide:
 
@@ -168,7 +170,8 @@ Button behavior = operation + run_mode.
   dry_run : find managed thumbnails
   execute : uninstall managed thumbnails
 
-dry_run changes nothing.
+dry_run does not modify thumbnails or source images.
+The internal source index may be updated.
 Empty source_image_root uses ComfyUI output.
 ```
 
@@ -180,11 +183,14 @@ Report first-line icons are intentionally stricter than button icons:
 
 ## Safe uninstall
 
-`uninstall_managed` removes only JPEG thumbnails that contain this node's management marker in the JPEG comment.
+`uninstall_managed` removes only JPEG thumbnails whose JPEG comment contains this node's exact tool, management, stable-schema, and target marker lines.
 
 Manual thumbnails, OGN-uploaded thumbnails, and unmanaged sidecar images are skipped.
 
+Uninstall dry run records each managed thumbnail's path and file identity. On Windows, execute locks the exact file object against replacement, validates that opened object against the dry-run snapshot, and deletes through the same handle. POSIX systems atomically detach and validate the exact path entry before deletion. Newly created, changed, or concurrently replaced files are not deleted.
+
 For safety, `uninstall_managed + execute` requires a fresh `uninstall_managed + dry_run` first. The confirmation expires after 10 minutes.
+The confirmation is bound to the managed thumbnail files seen by that dry run; newly created or changed files are skipped.
 
 ## Important behavior
 
@@ -192,7 +198,7 @@ For safety, `uninstall_managed + execute` requires a fresh `uninstall_managed + 
 
 If all checkpoints already have thumbnails, `source_image_root` is not scanned.
 
-Existing thumbnails are not overwritten in version 0.1.0.
+Existing thumbnails are never overwritten.
 
 To refresh thumbnails managed by this node, run `uninstall_managed` first, then run `install_missing` again. Manual or unmanaged thumbnails are not removed and will not be overwritten.
 
@@ -221,7 +227,25 @@ output/prefix/date/prefix_waiNSFWIllustrious_v150_0001.jpg
 
 Exact directory matches are preferred over substring matches. If one source image matches multiple checkpoints at the same best priority, it is skipped as ambiguous.
 
-The latest image by modification time is selected.
+When no valid indexed representative exists, the latest matching image by modification time is preferred within each scanned bucket. A valid cached representative remains selected even when newer images appear.
+
+## Persistent source index
+
+Source lookup uses a disposable JSON index under the ComfyUI user directory. The filesystem remains the source of truth.
+
+- Valid calendar-date `YYYYMMDD` directories are indexed as date buckets.
+- Source images outside date directories use first-level fallback buckets.
+- A cold or new bucket scan indexes the current checkpoint catalog in one pass.
+- Existing buckets use targeted scans for unresolved checkpoints.
+- `install_missing + dry_run` may update the internal index, while thumbnail and source-image files remain unchanged.
+- `execute` reuses the index warmed by dry run.
+- Date-bucket scans have no image-count limit.
+- If PushLocalList adds an image for a previously unmatched checkpoint, the changed date-directory state invalidates that negative cache and the next lookup scans the affected date bucket again.
+- If `source_image_root` changes, the disposable index is rebuilt for the new root.
+
+Valid cached representatives are reused without requiring an exact global-newest image. If a cached representative is deleted, only that checkpoint entry is repaired. If a date directory is moved outside `source_image_root`, its date entry is removed lazily.
+
+The report lists checkpoint names immediately below `Unmatched:` and `Errors:` without appending a generic Hint footer. Existing thumbnails are shown as a count only, without a five-item example list. Use an unmatched name with HandpickerSuite PushLocalList to generate a source image, then run the exporter again; a changed date bucket is rescanned for that checkpoint.
 
 ## OGN-ModelManager refresh
 
@@ -235,11 +259,11 @@ If all checkpoints are reported as unmatched, first check `source_image_root`.
 
 When `source_image_root` is empty, the exporter uses the current ComfyUI output directory only. If GM Image Saver is configured with an explicit output folder, or if your ComfyUI `output` folder is expected to be a junction/symlink, verify that it still points to the folder that actually contains generated images.
 
-## 0.1.0 scope
+## 0.2.0 scope
 
 - OGN-ModelManager only
 - `.jpg` output only
-- representative rule fixed to `latest`
+- cold-scan candidate preference fixed to `latest`; valid cached representatives remain stable
 - no overwrite mode
 - no Civitai download
 - no tag/favorite overlay burn-in
@@ -254,4 +278,4 @@ It does not call OGN-ModelManager thumbnail APIs and does not modify OGN-ModelMa
 
 ## Development note
 
-This project keeps implementation specs under `.spec/*.md`. The zip/build label (`TOOL_BUILD`, for example `v1e`) is intentionally not written to JPEG comments because build labels may change frequently during ChatGPT-assisted iterations. Generated JPEG comments use a stable `comment_schema=cte_comment_v1` marker instead.
+This project keeps implementation specs under `.spec/*.md`. Generated JPEG comments use the stable `comment_schema=cte_comment_v1` marker for managed-thumbnail compatibility.

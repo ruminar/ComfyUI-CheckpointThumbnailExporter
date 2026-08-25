@@ -72,11 +72,156 @@ function payloadKey(node) {
     });
 }
 
+function syncStatusUI(node) {
+    const ui = node.cte_status_ui;
+    if (!ui) return;
+
+    const progress = node.cte_progress || { current: 0, total: 0, status: "Ready.", current_name: "" };
+    const total = Number(progress.total || 0);
+    const current = Number(progress.current || 0);
+    const ratio = total > 0
+        ? Math.max(0, Math.min(1, current / total))
+        : (node.cte_is_running ? 0.25 : 0);
+    ui.progressFill.style.width = `${ratio * 100}%`;
+    ui.progressFill.style.background = node.cte_is_running ? "#7aa7ff" : "#6f9f6f";
+    ui.progressText.textContent = total > 0
+        ? `${current} / ${total}`
+        : String(progress.status || "Ready.");
+    ui.currentName.textContent = progress.current_name && progress.phase !== "scanning_source"
+        ? String(progress.current_name)
+        : "";
+
+    const reportText = node.cte_is_running
+        ? (node.cte_live_report || node.cte_report || "")
+        : (node.cte_report || "");
+    if (ui.textarea.value !== reportText) {
+        ui.textarea.value = reportText;
+    }
+}
+
+function createStatusUI(node) {
+    if (node.cte_status_ui || typeof node.addDOMWidget !== "function") return;
+
+    const root = document.createElement("div");
+    root.style.display = "flex";
+    root.style.flexDirection = "column";
+    root.style.gap = "5px";
+    root.style.width = "100%";
+    root.style.height = "100%";
+    root.style.minHeight = "245px";
+    root.style.boxSizing = "border-box";
+    root.style.padding = "2px 0";
+
+    const progressLabel = document.createElement("div");
+    progressLabel.textContent = "Progress";
+    progressLabel.style.fontSize = "12px";
+
+    const progressTrack = document.createElement("div");
+    progressTrack.style.position = "relative";
+    progressTrack.style.width = "100%";
+    progressTrack.style.height = "12px";
+    progressTrack.style.flex = "0 0 12px";
+    progressTrack.style.boxSizing = "border-box";
+    progressTrack.style.border = "1px solid #555";
+    progressTrack.style.background = "#222";
+
+    const progressFill = document.createElement("div");
+    progressFill.style.width = "0%";
+    progressFill.style.height = "100%";
+    progressFill.style.background = "#6f9f6f";
+    progressTrack.append(progressFill);
+
+    const progressLine = document.createElement("div");
+    progressLine.style.display = "flex";
+    progressLine.style.gap = "8px";
+    progressLine.style.minHeight = "16px";
+    progressLine.style.fontSize = "11px";
+    progressLine.style.color = "#CCC";
+
+    const progressText = document.createElement("span");
+    const currentName = document.createElement("span");
+    currentName.style.overflow = "hidden";
+    currentName.style.textOverflow = "ellipsis";
+    currentName.style.whiteSpace = "nowrap";
+    progressLine.append(progressText, currentName);
+
+    const reportLabel = document.createElement("div");
+    reportLabel.textContent = "Report";
+    reportLabel.style.fontSize = "12px";
+
+    const textarea = document.createElement("textarea");
+    textarea.readOnly = true;
+    textarea.spellcheck = false;
+    textarea.wrap = "soft";
+    textarea.setAttribute("aria-label", "Checkpoint Thumbnail Exporter report");
+    textarea.style.width = "100%";
+    textarea.style.height = "100%";
+    textarea.style.minHeight = `${REPORT_HEIGHT}px`;
+    textarea.style.resize = "vertical";
+    textarea.style.boxSizing = "border-box";
+    textarea.style.padding = "7px";
+    textarea.style.border = "1px solid #444";
+    textarea.style.borderRadius = "2px";
+    textarea.style.background = "#161616";
+    textarea.style.color = "#E5E5E5";
+    textarea.style.fontFamily = "monospace";
+    textarea.style.fontSize = "11px";
+    textarea.style.lineHeight = "1.3";
+    textarea.style.whiteSpace = "pre-wrap";
+    textarea.style.overflowWrap = "anywhere";
+    textarea.style.overflow = "auto";
+    textarea.style.cursor = "text";
+
+    const stopPropagation = (event) => event.stopPropagation();
+    for (const eventName of [
+        "pointerdown",
+        "pointerup",
+        "mousedown",
+        "mouseup",
+        "click",
+        "dblclick",
+        "contextmenu",
+        "wheel",
+        "keyup",
+    ]) {
+        textarea.addEventListener(eventName, stopPropagation);
+    }
+    textarea.addEventListener("keydown", (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+            event.preventDefault();
+        }
+        event.stopPropagation();
+    });
+
+    root.append(progressLabel, progressTrack, progressLine, reportLabel, textarea);
+    const domWidget = node.addDOMWidget(
+        "cte_status_report",
+        "checkpoint-thumbnail-exporter-status",
+        root,
+        {
+            serialize: false,
+            hideOnZoom: false,
+            getValue: () => textarea.value,
+            setValue: () => {},
+        },
+    );
+    node.cte_status_ui = {
+        root,
+        progressFill,
+        progressText,
+        currentName,
+        textarea,
+        domWidget,
+    };
+    syncStatusUI(node);
+}
+
 function updateButton(node) {
     const button = node.cte_button_widget;
     if (!button) return;
     button.name = buttonLabel(node);
     button.label = button.name;
+    syncStatusUI(node);
     app.graph.setDirtyCanvas(true, true);
 }
 
@@ -187,6 +332,7 @@ api.addEventListener("checkpoint-thumbnail-exporter-progress", (event) => {
         if (node.cte_is_running && data.report) {
             node.cte_live_report = String(data.report);
         }
+        syncStatusUI(node);
         app.graph.setDirtyCanvas(true, true);
         break;
     }
@@ -201,7 +347,7 @@ app.registerExtension({
         nodeType.prototype.onNodeCreated = function () {
             const r = originalOnNodeCreated?.apply(this, arguments);
 
-            this.cte_report = "Ready.\n\nButton behavior = operation + run_mode.\n\n🎨 install_missing\n  dry_run : find missing thumbnails\n  execute : install missing thumbnails\n\n❌ uninstall_managed\n  dry_run : find managed thumbnails\n  execute : uninstall managed thumbnails\n\ndry_run changes nothing.\nEmpty source_image_root uses ComfyUI output.";
+            this.cte_report = "Ready.\n\nButton behavior = operation + run_mode.\n\n🎨 install_missing\n  dry_run : find missing thumbnails\n  execute : install missing thumbnails\n\n❌ uninstall_managed\n  dry_run : find managed thumbnails\n  execute : uninstall managed thumbnails\n\ndry_run does not modify thumbnails or source images.\nThe internal source index may be updated.\nEmpty source_image_root uses ComfyUI output.";
             this.cte_progress = { phase: "idle", current: 0, total: 0, status: "Ready.", current_name: "" };
             this.cte_confirm_token = null;
             this.cte_confirm_key = null;
@@ -237,9 +383,10 @@ app.registerExtension({
                 runExporter(this);
             });
             ensureButtonAfterRunMode(this);
+            createStatusUI(this);
 
             this.size[0] = Math.max(this.size[0], MIN_WIDTH);
-            this.size[1] = Math.max(this.size[1], 420);
+            this.size[1] = Math.max(this.size[1], 500);
             updateButton(this);
             return r;
         };
@@ -248,6 +395,7 @@ app.registerExtension({
         nodeType.prototype.onDrawForeground = function (ctx) {
             originalOnDrawForeground?.apply(this, arguments);
             if (this.flags?.collapsed) return;
+            if (this.cte_status_ui) return;
 
             const width = this.size[0];
             const margin = 12;
