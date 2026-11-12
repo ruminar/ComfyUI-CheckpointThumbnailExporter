@@ -55,6 +55,8 @@ It can also be used as a lightweight visual checkpoint catalog based on images g
 - ComfyUI
 - Pillow
 
+The node frontend supports both Legacy Nodes and Nodes 2.0.
+
 GraphicsMagick is **not** required.
 
 Pillow is already included in most ComfyUI environments. It is used to resize and write thumbnail JPEG files.

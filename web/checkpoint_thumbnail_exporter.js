@@ -3,7 +3,10 @@ import { api } from "../../scripts/api.js";
 
 const NODE_NAME = "CheckpointThumbnailExporter";
 const MIN_WIDTH = 470;
+const MIN_HEIGHT = 520;
 const REPORT_HEIGHT = 170;
+const STATUS_UI_MIN_HEIGHT = 245;
+const RUN_BUTTON_WIDGET_NAME = "cte_run";
 
 function getWidget(node, name) {
     return node.widgets?.find((w) => w.name === name);
@@ -12,6 +15,11 @@ function getWidget(node, name) {
 function getWidgetValue(node, name, fallback = "") {
     const widget = getWidget(node, name);
     return widget ? widget.value : fallback;
+}
+
+function ensureMinimumNodeSize(node) {
+    node.size[0] = Math.max(node.size[0], MIN_WIDTH);
+    node.size[1] = Math.max(node.size[1], MIN_HEIGHT);
 }
 
 function setWidgetValue(node, name, value) {
@@ -108,7 +116,7 @@ function createStatusUI(node) {
     root.style.gap = "5px";
     root.style.width = "100%";
     root.style.height = "100%";
-    root.style.minHeight = "245px";
+    root.style.minHeight = `${STATUS_UI_MIN_HEIGHT}px`;
     root.style.boxSizing = "border-box";
     root.style.padding = "2px 0";
 
@@ -201,6 +209,7 @@ function createStatusUI(node) {
         {
             serialize: false,
             hideOnZoom: false,
+            getMinHeight: () => STATUS_UI_MIN_HEIGHT,
             getValue: () => textarea.value,
             setValue: () => {},
         },
@@ -219,8 +228,7 @@ function createStatusUI(node) {
 function updateButton(node) {
     const button = node.cte_button_widget;
     if (!button) return;
-    button.name = buttonLabel(node);
-    button.label = button.name;
+    button.label = buttonLabel(node);
     syncStatusUI(node);
     app.graph.setDirtyCanvas(true, true);
 }
@@ -237,17 +245,6 @@ function resetRunMode(node, reason) {
         node.cte_live_report = reason;
     }
     updateButton(node);
-}
-
-function ensureButtonAfterRunMode(node) {
-    if (!node.cte_button_widget || !node.widgets) return;
-    const button = node.cte_button_widget;
-    const currentIndex = node.widgets.indexOf(button);
-    const runModeIndex = node.widgets.findIndex((w) => w.name === "run_mode");
-    if (currentIndex < 0 || runModeIndex < 0) return;
-    node.widgets.splice(currentIndex, 1);
-    const freshRunModeIndex = node.widgets.findIndex((w) => w.name === "run_mode");
-    node.widgets.splice(freshRunModeIndex + 1, 0, button);
 }
 
 async function runExporter(node) {
@@ -378,16 +375,21 @@ app.registerExtension({
                 runModeWidget.cte_wrapped = true;
             }
 
-            this.cte_button_widget = this.addWidget("button", buttonLabel(this), null, () => {
+            this.cte_button_widget = this.addWidget("button", RUN_BUTTON_WIDGET_NAME, null, () => {
                 if (this.cte_is_running) return;
                 runExporter(this);
             });
-            ensureButtonAfterRunMode(this);
             createStatusUI(this);
 
-            this.size[0] = Math.max(this.size[0], MIN_WIDTH);
-            this.size[1] = Math.max(this.size[1], 500);
+            ensureMinimumNodeSize(this);
             updateButton(this);
+            return r;
+        };
+
+        const originalOnConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function () {
+            const r = originalOnConfigure?.apply(this, arguments);
+            ensureMinimumNodeSize(this);
             return r;
         };
 

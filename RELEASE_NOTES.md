@@ -1,5 +1,11 @@
 # Release Notes
 
+## Unreleased
+
+### Changed
+
+- Added dual frontend compatibility for Legacy Nodes and Nodes 2.0 by declaring DOM-widget layout sizing and keeping the action widget name stable.
+
 ## 0.2.0 - 2026-08-25
 
 This release makes large source-image libraries fast to search, improves the PushLocalList recovery workflow, and hardens thumbnail installation and managed-thumbnail removal against concurrent file changes.

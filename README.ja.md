@@ -40,6 +40,8 @@ OGN-ModelManager互換のサムネイルが、モデルの横に全自動でイ�
 
 ComfyUIの `custom_nodes` ディレクトリに、このフォルダをそのまま手動クローン（または展開）し、ComfyUIを再起動するが良い。
 
+フロントエンドはLegacy NodesとNodes 2.0の両方に対応しておる。
+
 ```text
 ComfyUI/custom_nodes/ComfyUI-CheckpointThumbnailExporter
 ```

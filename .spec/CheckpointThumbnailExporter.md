@@ -133,6 +133,8 @@ This order is intentional: users should be able to read an unmatched checkpoint 
 
 The report area is a read-only, selectable text area. Users may select text and copy it with keyboard shortcuts or the context menu, but they must not be able to edit it. A canvas-rendered report is only a compatibility fallback when the running ComfyUI frontend does not provide DOM widgets.
 
+The frontend must support both Legacy Nodes and Nodes 2.0 through the shared `addDOMWidget()` API. The status DOM widget declares its minimum layout height through `getMinHeight()`. Dynamically changing button text uses a stable internal widget name and updates only the widget label; registered widget names must not be renamed or reordered by directly splicing `node.widgets`.
+
 While the report area has focus, `Ctrl+S` / `Cmd+S` must be consumed so the browser does not open its HTML save dialog. Selection and copy shortcuts such as `Ctrl+A` / `Cmd+A` and `Ctrl+C` / `Cmd+C` remain available.
 
 Existing thumbnails are reported by count only. Do not append an `Existing thumbnails preserved:` example list because it has no exceptional meaning and can bury the actionable unmatched and error lists.
