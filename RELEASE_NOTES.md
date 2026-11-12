@@ -1,10 +1,13 @@
 # Release Notes
 
-## Unreleased
+## 0.2.1 - 2026-11-12
+
+This release adds frontend compatibility with both Legacy Nodes and Nodes 2.0 while preserving existing workflows and the Python V1 API.
 
 ### Changed
 
 - Added dual frontend compatibility for Legacy Nodes and Nodes 2.0 by declaring DOM-widget layout sizing and keeping the action widget name stable.
+- Increased the minimum node height so the read-only report remains inside the node in Legacy Nodes, including when loading existing workflows saved with a smaller size.
 
 ## 0.2.0 - 2026-08-25
 

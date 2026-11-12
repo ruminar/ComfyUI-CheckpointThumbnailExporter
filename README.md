@@ -101,7 +101,7 @@ Leave empty to use the current ComfyUI output folder.
 target_format
 ```
 
-Version 0.2.0 supports only:
+Version 0.2.x supports only:
 
 ```text
 OGN-ModelManager
@@ -261,7 +261,7 @@ If all checkpoints are reported as unmatched, first check `source_image_root`.
 
 When `source_image_root` is empty, the exporter uses the current ComfyUI output directory only. If GM Image Saver is configured with an explicit output folder, or if your ComfyUI `output` folder is expected to be a junction/symlink, verify that it still points to the folder that actually contains generated images.
 
-## 0.2.0 scope
+## 0.2.x scope
 
 - OGN-ModelManager only
 - `.jpg` output only
